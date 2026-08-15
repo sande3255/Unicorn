@@ -1,0 +1,322 @@
+/* UNICORN — yellowjacket / treasure theme: black fields, gold detailing.
+   This is the app's fixed identity now, not a light/dark toggle. */
+:root {
+  color-scheme: dark;
+  --page: #070705;
+  --surface-1: #0e0d09;
+  --card-bg: #17160f;
+  --text-primary: #f5f2e6;
+  --text-secondary: #b8b3a0;
+  --text-muted: #8a8575;
+  --gridline: rgba(255, 198, 26, 0.12);
+  --baseline: rgba(255, 198, 26, 0.35);
+  --series-1: #ffc61a;
+  --gold: #ffc61a;
+  --gold-dim: #caa023;
+  --good: #22c55e;
+  --critical: #f34141;
+  --warning: #ffc61a;
+  --border: rgba(255, 198, 26, 0.20);
+  --border-strong: rgba(255, 198, 26, 0.45);
+}
+
+* { box-sizing: border-box; }
+
+a { color: var(--gold); }
+a:hover { color: var(--text-primary); }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background:
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgba(255,198,26,0.06), transparent 60%),
+    var(--page);
+  color: var(--text-primary);
+}
+
+/* Hazard-stripe accent bar — the yellowjacket signature */
+.hazard-stripe {
+  height: 6px;
+  background: repeating-linear-gradient(
+    135deg,
+    #000000 0px, #000000 14px,
+    var(--gold) 14px, var(--gold) 28px
+  );
+}
+
+#banner {
+  background: #0e0d09;
+  color: var(--gold);
+  text-align: center;
+  font-size: 12.5px;
+  padding: 7px 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--border);
+}
+
+#site-header {
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border-strong);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.header-inner {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.brand {
+  font-weight: 800;
+  font-size: 19px;
+  letter-spacing: 0.02em;
+  color: var(--text-primary);
+  text-decoration: none;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.brand-icon { flex: none; display: block; color: var(--gold); }
+.brand-tag {
+  font-size: 11px;
+  font-weight: 700;
+  color: #0a0900;
+  background: var(--gold);
+  border-radius: 4px;
+  padding: 2px 7px;
+  margin-left: 2px;
+  vertical-align: middle;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+#main-nav { display: flex; gap: 18px; flex: 1; }
+#main-nav a {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+#main-nav a:hover { color: var(--text-primary); }
+#main-nav a.active { color: var(--gold); }
+
+#auth-area { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.balance-pill {
+  background: #000;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 14px 4px 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--gold);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.balance-pill .coin { flex: none; }
+
+button, .btn {
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  border-radius: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+button.primary { background: var(--gold); color: #0a0900; border-color: transparent; }
+button.danger { background: var(--critical); color: #1a0a0a; border-color: transparent; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:hover:not(:disabled) { filter: brightness(1.08); }
+button.primary:hover:not(:disabled), button.danger:hover:not(:disabled) { filter: brightness(1.12); }
+a.btn { text-decoration: none; display: inline-block; }
+
+#app { max-width: 960px; margin: 0 auto; padding: 24px 20px 64px; }
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 0 rgba(255,198,26,0.04) inset;
+}
+
+.market-list { display: flex; flex-direction: column; gap: 12px; }
+.market-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding: 16px 18px; text-decoration: none; color: inherit;
+  transition: border-color 0.15s ease;
+}
+.market-row:hover { border-color: var(--border-strong); }
+.market-q { font-weight: 700; font-size: 15px; }
+.market-meta { color: var(--text-muted); font-size: 12px; margin-top: 4px; }
+.price-badge {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  font-size: 16px;
+  min-width: 64px;
+  text-align: right;
+}
+.price-badge.yes { color: var(--good); }
+.tag {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em;
+  color: var(--gold); border: 1px solid var(--border-strong); border-radius: 4px; padding: 2px 6px;
+}
+.tag.resolved { color: var(--critical); border-color: var(--critical); }
+
+/* Countdown urgency — neon blue at rest, escalating to a pulsing red as a
+   timed market's close time approaches. Applied to both the compact list
+   "tag" chips and the plain countdown text on a market's detail page. */
+.countdown {
+  font-variant-numeric: tabular-nums;
+}
+.countdown-calm {
+  color: #4fd6ff;
+  text-shadow: 0 0 6px rgba(79, 214, 255, 0.55);
+}
+.countdown-warn {
+  color: #4fd6ff;
+  text-shadow: 0 0 9px rgba(79, 214, 255, 0.9), 0 0 18px rgba(79, 214, 255, 0.5);
+  animation: countdown-pulse-warn 1s ease-in-out infinite;
+}
+.countdown-critical {
+  color: #ff3b3b;
+  font-weight: 800;
+  text-shadow: 0 0 10px rgba(255, 59, 59, 0.95), 0 0 20px rgba(255, 59, 59, 0.6);
+  animation: countdown-pulse-critical 0.5s ease-in-out infinite;
+}
+@keyframes countdown-pulse-warn {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+@keyframes countdown-pulse-critical {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.12); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .countdown-warn, .countdown-critical { animation: none; }
+}
+
+h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: 0.01em; }
+h2 { font-size: 17px; margin: 0 0 10px; }
+p.muted { color: var(--text-secondary); font-size: 14px; }
+.tagline { color: var(--gold); font-size: 13px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; margin: 0 0 10px; }
+
+.detail-grid { display: grid; grid-template-columns: 1fr 320px; gap: 20px; }
+@media (max-width: 760px) { .detail-grid { grid-template-columns: 1fr; } }
+
+.trade-widget label { display: block; font-size: 13px; font-weight: 700; margin: 12px 0 6px; }
+.outcome-toggle { display: flex; gap: 8px; }
+.outcome-toggle button { flex: 1; }
+.outcome-toggle button.selected.yes { background: var(--good); color: #06170a; border-color: transparent; }
+.outcome-toggle button.selected.no { background: var(--critical); color: #1a0a0a; border-color: transparent; }
+input[type="number"], input[type="text"], input[type="password"], textarea, select {
+  width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: #000; color: var(--text-primary); font-family: inherit; font-size: 14px;
+}
+input:focus, textarea:focus, select:focus { outline: 2px solid var(--gold); outline-offset: 1px; }
+.trade-summary { font-size: 13px; color: var(--text-secondary); margin-top: 10px; line-height: 1.6; }
+.error-text { color: var(--critical); font-size: 13px; margin-top: 8px; }
+.success-text { color: var(--good); font-size: 13px; margin-top: 8px; }
+
+.inline-form { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.inline-form input[type="text"] { width: auto; flex: 1 1 220px; }
+.checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; }
+.checkbox-label input { width: auto; }
+.callout {
+  margin-top: 14px; padding: 12px 14px; border-radius: 8px;
+  background: rgba(255, 198, 26, 0.08); border: 1px solid var(--border-strong);
+}
+.callout p { margin: 0 0 8px; font-size: 13px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.key-plaintext {
+  display: block; word-break: break-all; padding: 8px 10px; border-radius: 6px;
+  background: #000; color: var(--gold); font-size: 13px;
+}
+
+.chart-tooltip {
+  position: absolute; pointer-events: none; background: #000;
+  border: 1px solid var(--border-strong); border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: var(--text-primary); box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  transform: translate(-50%, -110%);
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--gridline); white-space: nowrap; }
+th { color: var(--gold); font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr:hover td { background: rgba(255,198,26,0.03); }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+tr.me-row td { background: rgba(255,198,26,0.06); }
+td.rank-top { color: var(--gold); font-weight: 800; }
+td.amt-pos { color: var(--good); }
+td.amt-neg { color: var(--critical); }
+
+/* ---------- markets search + category filter chips ---------- */
+.market-filters { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.market-filters #market-search { max-width: 260px; }
+.chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip {
+  font-size: 12px; font-weight: 700; padding: 5px 12px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--card-bg); color: var(--text-secondary);
+}
+.chip:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.chip.selected { background: var(--gold); color: #0a0900; border-color: transparent; }
+
+form.auth-form { max-width: 360px; margin: 40px auto; }
+.link-btn { background: none; border: none; color: var(--gold); cursor: pointer; font-size: 13px; padding: 0; font-weight: 700; }
+
+.empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted); }
+
+::selection { background: var(--gold); color: #0a0900; }
+
+/* subtle "sea" divider used under the header on the markets page, a nod to the ship */
+.ship-divider { display: flex; align-items: center; gap: 10px; margin: 2px 0 18px; color: var(--text-muted); }
+.ship-divider svg { flex: none; opacity: 0.85; }
+.ship-divider .line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--border-strong), transparent); }
+
+/* ---------- mobile layout ---------- */
+@media (max-width: 640px) {
+  #banner { font-size: 11px; padding: 6px 10px; }
+  .header-inner { flex-wrap: wrap; gap: 8px 14px; padding: 10px 14px; }
+  .brand { font-size: 16px; gap: 6px; }
+  .brand-icon { width: 19px; height: 19px; }
+  .brand-tag { font-size: 10px; padding: 1px 6px; }
+  /* Base rule sets `flex: 1` (flex-basis: 0%) on #main-nav, which wins over
+     `width` for sizing a flex item — so this needs flex-basis: 100% (not
+     width: 100%) to actually force it onto its own full-width row. */
+  #main-nav { order: 3; flex: 1 1 100%; gap: 14px; overflow-x: auto; padding-bottom: 2px; }
+  #auth-area { margin-left: auto; font-size: 13px; gap: 8px; }
+  .balance-pill { padding: 3px 10px 3px 8px; font-size: 13px; }
+
+  #app { padding: 16px 14px 56px; }
+  h1 { font-size: 19px; }
+  h2 { font-size: 15px; }
+  .card { padding: 14px 14px; }
+
+  .market-row { padding: 13px 14px; gap: 10px; }
+  .market-q { font-size: 14px; }
+  .price-badge { min-width: 0; font-size: 15px; }
+
+  .market-filters { flex-direction: column; align-items: stretch; gap: 8px; }
+  .market-filters #market-search { max-width: none; }
+  .chip-row { overflow-x: auto; flex-wrap: nowrap; padding-bottom: 2px; }
+  .chip { flex: none; }
+
+  table { font-size: 12px; }
+  th, td { padding: 6px 5px; }
+
+  form.auth-form { margin: 20px auto; }
+
+  .outcome-toggle { flex-direction: column; }
+}
