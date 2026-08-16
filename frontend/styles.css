@@ -75,63 +75,6 @@ body {
   .hazard-stripe::after { animation: none; display: none; }
 }
 
-/* Wraps each hazard-stripe so a small running character can poke outside
-   the stripe's own 6px height (which stays overflow:hidden to clip the
-   sweep beam horizontally) without being clipped along with it. The wrap
-   itself takes its height from the stripe in normal flow — the runner is
-   absolutely positioned, so it doesn't add any layout height of its own. */
-.hazard-stripe-wrap { position: relative; }
-.hazard-runner {
-  position: absolute;
-  top: 50%;
-  left: -8%;
-  width: 20px;
-  height: 20px;
-  pointer-events: none;
-  z-index: 1;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.55));
-  animation:
-    hazard-runner-flee var(--sweep-duration, 5s) linear infinite,
-    hazard-runner-bob calc(var(--sweep-duration, 5s) / 9) ease-in-out infinite;
-}
-/* left is a percentage of the containing block (.hazard-stripe-wrap), so
-   this sweeps the runner across the full header width regardless of its
-   own small fixed pixel size — unlike transform's percentage, which is
-   relative to the element itself and would barely move it at all. */
-@keyframes hazard-runner-flee {
-  0%   { left: -8%; }
-  100% { left: 106%; }
-}
-/* A quick vertical bob layered on top of the horizontal sweep for a
-   "running" feel — translateY(-50%) is baked into every step alongside
-   the oscillation since it's what centers the runner on the stripe. */
-@keyframes hazard-runner-bob {
-  0%, 100% { transform: translateY(-50%) translateY(0); }
-  50%      { transform: translateY(-50%) translateY(-3px); }
-}
-/* The leprechaun's stripe is the very first thing in the page — nothing
-   above it to poke into. Centering him like the robot (top:50% +
-   translateY(-50%)) pushed roughly the top third of his sprite — the hat
-   tip, the one feature that actually reads as "hat" — above y=0, off the
-   document entirely, since a page can't render anything above its own
-   top edge. What was left (just the two flared bottom corners of the hat
-   triangle) is exactly what read as "ears" instead of a hat. Anchoring
-   from the stripe's own top edge instead keeps his whole sprite on-screen,
-   hanging down into the banner below (which has plenty of room for it). */
-.hazard-runner--leprechaun {
-  top: 0;
-  animation:
-    hazard-runner-flee var(--sweep-duration, 5s) linear infinite,
-    hazard-runner-bob-low calc(var(--sweep-duration, 5s) / 9) ease-in-out infinite;
-}
-@keyframes hazard-runner-bob-low {
-  0%, 100% { transform: translateY(0); }
-  50%      { transform: translateY(-3px); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .hazard-runner { display: none; }
-}
-
 #banner {
   background: #0e0d09;
   color: var(--gold);
