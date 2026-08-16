@@ -1086,9 +1086,35 @@ function renderLogin() {
   };
 }
 
+// ---------- support banner ----------
+
+const SUPPORT_BANNER_DISMISS_KEY = 'unicorn_support_banner_dismissed_v1';
+
+function initSupportBanner() {
+  const banner = document.getElementById('support-banner');
+  if (!banner) return;
+  try {
+    if (localStorage.getItem(SUPPORT_BANNER_DISMISS_KEY) === '1') {
+      banner.style.display = 'none';
+      return;
+    }
+  } catch (err) {
+    // localStorage can throw in some private-browsing modes — fall through
+    // and just show the banner every visit rather than breaking the page.
+  }
+  const closeBtn = document.getElementById('support-banner-close');
+  if (closeBtn) {
+    closeBtn.onclick = () => {
+      banner.style.display = 'none';
+      try { localStorage.setItem(SUPPORT_BANNER_DISMISS_KEY, '1'); } catch (err) { /* ignore */ }
+    };
+  }
+}
+
 // ---------- boot ----------
 
 (async function boot() {
+  initSupportBanner();
   await refreshMe();
   renderHeader();
   navigate();

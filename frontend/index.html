@@ -17,6 +17,21 @@
   <div id="banner">
     ☠ DEMO — play money only. Not connected to any real payment method. Read the README before doing anything with real funds.
   </div>
+  <!-- Optional support banner: funds the real-money licensing path (NFA/CFTC
+       registration + legal counsel), not the app itself — this is a separate
+       ask from the play-money demo above and links out to PayPal, nothing on
+       this site ever touches real funds directly. Dismissible; see
+       initSupportBanner() in app.js. -->
+  <div id="support-banner">
+    <div class="support-banner-inner">
+      <span class="support-banner-text">
+        <span class="support-banner-icon" aria-hidden="true">◈</span>
+        Chasing real NFA/CFTC licensing for UNICORN isn't free — legal counsel and registration fees add up. If you'd like to help push it over the line:
+      </span>
+      <a class="support-banner-btn" href="https://www.paypal.com/donate?business=msandersoddd%40gmail.com&no_recurring=0&item_name=UNICORN+Licensing+%26+Legal+Fund&currency_code=USD" target="_blank" rel="noopener noreferrer">Support the Licensing Fund</a>
+      <button class="support-banner-close" id="support-banner-close" type="button" aria-label="Dismiss support banner">&times;</button>
+    </div>
+  </div>
   <header id="site-header">
     <div class="header-inner">
       <a href="#/markets" class="brand">
@@ -34,7 +49,7 @@
             <line x1="16.3" y1="7.7" x2="19.5" y2="4.5"/>
           </g>
         </svg>
-        UNICORN <span class="brand-tag">demo</span>
+        <span class="brand-name">UNICORN</span> <span class="brand-tag">demo</span>
       </a>
       <nav id="main-nav"></nav>
       <div id="auth-area"></div>

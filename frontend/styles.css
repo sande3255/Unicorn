@@ -34,14 +34,39 @@ body {
   color: var(--text-primary);
 }
 
-/* Hazard-stripe accent bar — the yellowjacket signature */
+/* Circuit-scan accent bar — replaces the old black/gold caution tape with a
+   "future tech" strip: a row of small gold circuit-pad ticks on a dark
+   panel, with a cyan-to-gold light beam sweeping across on a loop. Same
+   gold accent as the rest of the theme, just a sci-fi read instead of an
+   industrial-warning one. */
 .hazard-stripe {
   height: 6px;
-  background: repeating-linear-gradient(
-    135deg,
-    #000000 0px, #000000 14px,
-    var(--gold) 14px, var(--gold) 28px
-  );
+  position: relative;
+  overflow: hidden;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0px, transparent 17px,
+      var(--gold) 17px, var(--gold) 20px
+    ),
+    linear-gradient(90deg, #060a0d, #0c1620 45%, #060a0d);
+}
+.hazard-stripe::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 45%;
+  background: linear-gradient(90deg,
+    transparent, rgba(79, 214, 255, 0.85), rgba(255, 198, 26, 0.95), transparent);
+  mix-blend-mode: screen;
+  animation: circuit-sweep 5s linear infinite;
+}
+@keyframes circuit-sweep {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .hazard-stripe::after { animation: none; display: none; }
 }
 
 #banner {
@@ -53,6 +78,69 @@ body {
   font-weight: 700;
   letter-spacing: 0.02em;
   border-bottom: 1px solid var(--border);
+}
+
+/* Support banner — asks for help funding the real-money licensing path
+   (NFA/CFTC registration, legal counsel). Visually related to the DEMO
+   banner above it but styled with a cyan/gold gradient so it reads as a
+   distinct, optional ask rather than a warning. Dismissible; app.js
+   remembers the dismissal in localStorage so it doesn't nag every visit. */
+#support-banner {
+  background: linear-gradient(90deg, #0c1620, #0e0d09 55%, #0c1620);
+  border-bottom: 1px solid var(--border-strong);
+  padding: 8px 12px;
+}
+.support-banner-inner {
+  max-width: 960px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.support-banner-icon {
+  color: #4fd6ff;
+  filter: drop-shadow(0 0 4px rgba(79, 214, 255, 0.7));
+  margin-right: 2px;
+}
+.support-banner-text {
+  flex: 1 1 auto;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.support-banner-btn {
+  flex: none;
+  color: #0a0900;
+  background: linear-gradient(90deg, var(--gold), #ffe08a);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  white-space: nowrap;
+  padding: 6px 14px;
+  border-radius: 999px;
+  box-shadow: 0 0 10px rgba(255, 198, 26, 0.45);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.support-banner-btn:hover {
+  color: #0a0900;
+  box-shadow: 0 0 16px rgba(255, 198, 26, 0.75);
+  transform: translateY(-1px);
+}
+.support-banner-close {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.support-banner-close:hover { color: var(--text-primary); }
+@media (max-width: 640px) {
+  .support-banner-inner { flex-wrap: wrap; }
+  .support-banner-text { flex-basis: 100%; }
 }
 
 #site-header {
@@ -83,18 +171,46 @@ body {
   align-items: center;
   gap: 8px;
 }
-.brand-icon { flex: none; display: block; color: var(--gold); }
+.brand-icon {
+  flex: none;
+  display: block;
+  color: var(--gold);
+  /* Twin drop-shadows (warm gold + cool cyan) read as a little holographic
+     glow around the compass mark instead of a flat icon. */
+  filter: drop-shadow(0 0 5px rgba(255, 198, 26, 0.6)) drop-shadow(0 0 12px rgba(79, 214, 255, 0.4));
+}
+.brand-name {
+  background: linear-gradient(90deg, var(--gold), #4fd6ff, var(--gold));
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: brand-shimmer 6s linear infinite;
+}
+@keyframes brand-shimmer {
+  0%   { background-position: 0% center; }
+  100% { background-position: 200% center; }
+}
 .brand-tag {
   font-size: 11px;
   font-weight: 700;
   color: #0a0900;
   background: var(--gold);
-  border-radius: 4px;
-  padding: 2px 7px;
+  border-radius: 999px;
+  padding: 2px 9px;
   margin-left: 2px;
   vertical-align: middle;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+  box-shadow: 0 0 10px rgba(255, 198, 26, 0.5);
+  animation: badge-pulse 2.4s ease-in-out infinite;
+}
+@keyframes badge-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(255, 198, 26, 0.45); }
+  50%      { box-shadow: 0 0 14px rgba(255, 198, 26, 0.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-name, .brand-tag { animation: none; }
 }
 
 #main-nav { display: flex; gap: 18px; flex: 1; }
