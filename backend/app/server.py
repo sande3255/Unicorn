@@ -497,7 +497,6 @@ def deposits_summary():
 @optional_auth
 @rate_limit(120, 60)
 def list_markets():
-<<<<<<< HEAD
     """Optional ?status=open or ?status=resolved narrows the result;
     omitting it returns every market ever created (unchanged default, so
     existing bots/scripts relying on "all markets" per API.md keep working).
@@ -512,10 +511,6 @@ def list_markets():
         ).fetchall()
     else:
         rows = conn.execute("SELECT * FROM markets ORDER BY created_at DESC").fetchall()
-=======
-    conn = db.get_db()
-    rows = conn.execute("SELECT * FROM markets ORDER BY created_at DESC").fetchall()
->>>>>>> 348ccc1d95e167b4d73c2bfc60f2abb915363f8d
     return jsonify([serialize_market(m) for m in rows])
 
 
