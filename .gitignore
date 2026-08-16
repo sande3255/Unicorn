@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# The live database — generated at runtime, don't want your play-money
+# data (or anyone else's) committed to a public repo. WAL mode (see
+# db.py) also creates -wal/-shm sidecar files alongside it.
+backend/predictmarket.db
+*.db
+*.db-wal
+*.db-shm
+
+# Misc local artifacts
+backend/python3
+predictmarket.zip
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/

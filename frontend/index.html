@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UNICORN — play-money prediction markets</title>
+  <meta name="description" content="UNICORN is a play-money prediction market demo — trade YES/NO shares on live crypto, stock, and index price moves, plus imported Kalshi/Polymarket questions. No real money, ever." />
+  <meta name="theme-color" content="#070705" />
+  <!-- Reuses the header brand mark as the favicon (gold compass-rose on
+       black) rather than shipping a separate image asset — one SVG, no
+       extra file, and it stays in sync if the brand mark ever changes. -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23070705'/%3E%3Ccircle cx='12' cy='12' r='8' stroke='%23ffc61a' stroke-width='1.8' fill='none'/%3E%3Ccircle cx='12' cy='12' r='2.4' fill='%23ffc61a'/%3E%3Cg stroke='%23ffc61a' stroke-width='1.8' stroke-linecap='round'%3E%3Cline x1='12' y1='1.5' x2='12' y2='5.5'/%3E%3Cline x1='12' y1='18.5' x2='12' y2='22.5'/%3E%3Cline x1='1.5' y1='12' x2='5.5' y2='12'/%3E%3Cline x1='18.5' y1='12' x2='22.5' y2='12'/%3E%3C/g%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="hazard-stripe"></div>
+  <div id="banner">
+    ☠ DEMO — play money only. Not connected to any real payment method. Read the README before doing anything with real funds.
+  </div>
+  <header id="site-header">
+    <div class="header-inner">
+      <a href="#/markets" class="brand">
+        <svg class="brand-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6"/>
+          <circle cx="12" cy="12" r="2.3" fill="currentColor"/>
+          <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <line x1="12" y1="1.5" x2="12" y2="6.2"/>
+            <line x1="12" y1="17.8" x2="12" y2="22.5"/>
+            <line x1="1.5" y1="12" x2="6.2" y2="12"/>
+            <line x1="17.8" y1="12" x2="22.5" y2="12"/>
+            <line x1="4.5" y1="4.5" x2="7.7" y2="7.7"/>
+            <line x1="16.3" y1="16.3" x2="19.5" y2="19.5"/>
+            <line x1="4.5" y1="19.5" x2="7.7" y2="16.3"/>
+            <line x1="16.3" y1="7.7" x2="19.5" y2="4.5"/>
+          </g>
+        </svg>
+        UNICORN <span class="brand-tag">demo</span>
+      </a>
+      <nav id="main-nav"></nav>
+      <div id="auth-area"></div>
+    </div>
+  </header>
+  <div class="hazard-stripe"></div>
+  <main id="app"></main>
+  <script src="/app.js"></script>
+</body>
+</html>
