@@ -66,6 +66,19 @@ function fmtUnderlyingPrice(p) {
   return p < 1 ? `$${p.toFixed(4)}` : `$${p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+function fmtTemp(p) {
+  if (p === null || p === undefined) return '—';
+  return `${Math.round(p)}°F`;
+}
+
+// Weather markets' underlying "price" is a Fahrenheit reading, not a
+// dollar figure — every other timed-feed market type (crypto/stock/index/
+// commodity/forex) still wants fmtUnderlyingPrice. One switch here instead
+// of repeating the market_type check at every call site below.
+function fmtUnderlying(m, p) {
+  return m.market_type === 'weather' ? fmtTemp(p) : fmtUnderlyingPrice(p);
+}
+
 // ---------- API helper ----------
 
 async function api(path, { method = 'GET', body = null, auth = true } = {}) {
@@ -341,15 +354,16 @@ function renderFilteredMarketsList() {
     return;
   }
   listEl.innerHTML = filtered.map(m => {
-    const isTimedFeed = m.is_auto && (m.market_type === 'crypto' || m.market_type === 'commodity' || m.market_type === 'stock' || m.market_type === 'index' || m.market_type === 'forex');
+    const isTimedFeed = m.is_auto && (m.market_type === 'crypto' || m.market_type === 'commodity' || m.market_type === 'stock' || m.market_type === 'index' || m.market_type === 'forex' || m.market_type === 'weather');
     const isImported = m.is_auto && (m.market_type === 'kalshi' || m.market_type === 'polymarket');
+    const isSportsLive = m.is_auto && m.market_type === 'sports';
     const statusBit = m.status === 'resolved'
       ? `<span class="tag resolved">Resolved ${m.resolved_outcome}</span>`
       : (isTimedFeed ? `<span class="tag ${countdownUrgencyClass(m.close_time)}" data-countdown="${escapeHtml(m.close_time || '')}">closes in …</span>`
-        : (isImported ? `<span class="tag">live</span>` : 'Open'));
+        : ((isImported || isSportsLive) ? `<span class="tag">live</span>` : 'Open'));
     let livePrice = '';
     if (m.status === 'open' && isTimedFeed) {
-      livePrice = ` · live ${fmtUnderlyingPrice(m.current_price)} (strike ${fmtUnderlyingPrice(m.strike_price)})`;
+      livePrice = ` · live ${fmtUnderlying(m, m.current_price)} (strike ${fmtUnderlying(m, m.strike_price)})`;
     } else if (m.status === 'open' && isImported) {
       livePrice = ` · ${fmtPct(m.current_price)} on ${m.market_type === 'kalshi' ? 'Kalshi' : 'Polymarket'}`;
     }
@@ -385,18 +399,20 @@ async function renderMarketDetail(idStr) {
   setPageTitle(m.question);
 
   const isOpen = m.status === 'open';
-  const isTimedFeed = m.is_auto && (m.market_type === 'crypto' || m.market_type === 'commodity' || m.market_type === 'stock' || m.market_type === 'index' || m.market_type === 'forex');
+  const isTimedFeed = m.is_auto && (m.market_type === 'crypto' || m.market_type === 'commodity' || m.market_type === 'stock' || m.market_type === 'index' || m.market_type === 'forex' || m.market_type === 'weather');
   const isImported = m.is_auto && (m.market_type === 'kalshi' || m.market_type === 'polymarket');
+  const isSportsLive = m.is_auto && m.market_type === 'sports';
+  const underlyingLabel = m.market_type === 'weather' ? 'temperature' : 'price';
 
   let liveBlock = '';
   if (isTimedFeed) {
     liveBlock = `
     <div class="card" id="live-price-card">
-      <h2>${escapeHtml(m.symbol_label || '')} price</h2>
+      <h2>${escapeHtml(m.symbol_label || '')} ${underlyingLabel}</h2>
       <p class="muted" style="font-size:20px;font-weight:700;color:var(--text-primary);margin:4px 0;">
-        <span id="live-underlying-price">${fmtUnderlyingPrice(m.current_price)}</span>
+        <span id="live-underlying-price">${fmtUnderlying(m, m.current_price)}</span>
       </p>
-      <p class="muted" style="margin:0;">Strike (opened at): ${fmtUnderlyingPrice(m.strike_price)}${m.settlement_price != null ? ` · Settled at: ${fmtUnderlyingPrice(m.settlement_price)}` : ''}</p>
+      <p class="muted" style="margin:0;">Strike (opened at): ${fmtUnderlying(m, m.strike_price)}${m.settlement_price != null ? ` · Settled at: ${fmtUnderlying(m, m.settlement_price)}` : ''}</p>
       ${isOpen ? `<p class="muted" style="margin:8px 0 0;">Closes in <strong id="market-countdown" class="${countdownUrgencyClass(m.close_time)}">${fmtCountdown(m.close_time) || '—'}</strong></p>` : ''}
     </div>`;
   } else if (isImported) {
@@ -409,6 +425,12 @@ async function renderMarketDetail(idStr) {
       </p>
       <p class="muted" style="margin:0;">Trades here use UNICORN's own play money and don't affect the real ${sourceName} market. Settles automatically once the real market resolves.</p>
       ${m.source_url ? `<p style="margin:8px 0 0;"><a href="${escapeHtml(m.source_url)}" target="_blank" rel="noopener">View original on ${sourceName} ↗</a></p>` : ''}
+    </div>`;
+  } else if (isSportsLive) {
+    liveBlock = `
+    <div class="card" id="live-price-card">
+      <h2>Live from MLB</h2>
+      <p class="muted" style="margin:0;">${isOpen ? 'No fixed clock — this resolves the moment the half-inning is decided, following the real game.' : 'This half-inning has been decided.'}</p>
     </div>`;
   }
 
@@ -469,7 +491,7 @@ async function renderMarketDetail(idStr) {
       m.price_yes = fresh.price_yes;
       m.current_price = fresh.current_price;
       const underlyingEl = document.getElementById('live-underlying-price');
-      if (underlyingEl) underlyingEl.textContent = isImported ? fmtPct(fresh.current_price) : fmtUnderlyingPrice(fresh.current_price);
+      if (underlyingEl) underlyingEl.textContent = isImported ? fmtPct(fresh.current_price) : fmtUnderlying(m, fresh.current_price);
       const chartWrap = document.getElementById('chart-wrap');
       if (chartWrap) renderPriceChart(chartWrap, fresh.price_history, fresh.price_yes, { isOpen: true });
       const pickYes = document.getElementById('pick-yes');
@@ -1057,8 +1079,10 @@ async function renderAdmin() {
       <div id="deposits-summary">Loading…</div>
     </div>
     <div class="card">
-      <h2>Live timed markets — a fixed roster of 54 (stocks, crypto, indices, commodities &amp; forex)</h2>
-      <p class="muted">A curated, definitive board of well-known American names: 12 top US stocks (5-min and 15-min), the 10 most recognizable cryptocurrencies (5-min and 15-min), the 4 headline US stock indices (15-min), 3 major commodities (gold/silver/crude, 15-min), and 3 major currency pairs (15-min) — 54 templates total, all the same "will it be above or below this price" fast win-or-lose format, settling against real live prices. Nothing to do here; the background scheduler manages them. Edit <code>backend/app/scheduler.py</code>'s <code>AUTO_MARKET_CONFIGS</code> to change the roster.</p>
+      <h2>Live timed markets — a fixed roster of 59 (stocks, crypto, indices, commodities, forex &amp; weather)</h2>
+      <p class="muted">A curated, definitive board of well-known American names: 12 top US stocks (5-min and 15-min), the 10 most recognizable cryptocurrencies (5-min and 15-min), the 4 headline US stock indices (15-min), 3 major commodities (gold/silver/crude, 15-min), 3 major currency pairs (15-min), and 5 major-metro temperature readings (15-min) — 59 templates total, all the same "will it be above or below this reading" fast win-or-lose format, settling against real live prices/temperatures. Nothing to do here; the background scheduler manages them. Edit <code>backend/app/scheduler.py</code>'s <code>AUTO_MARKET_CONFIGS</code> to change the roster.</p>
+      <h2 style="margin-top:16px;">Sports — live MLB half-innings, no fixed clock</h2>
+      <p class="muted">Separate from the fixed roster above: while an MLB game is live, UNICORN opens a market for the current half-inning ("Will the Yankees score in the bottom of the 9th?") sourced from MLB's public Stats API, and resolves it the moment a run scores or the half-inning ends scoreless — no fixed 5/15-min clock, it just follows the real game. See <code>sports_tick()</code> in <code>backend/app/scheduler.py</code> and <code>backend/app/sports_feed.py</code>.</p>
       <h2 style="margin-top:16px;">Kalshi &amp; Polymarket imports — off by default</h2>
       <p class="muted">UNICORN can still pull in trending real-world markets from Kalshi/Polymarket, but that's switched off out of the box (<code>EXTERNAL_IMPORT_MAX_OPEN_TOTAL = 0</code>) to keep the board 100% fast, definitive markets — no slow real-world events to wait hours or days on. Set it above 0 in <code>backend/app/scheduler.py</code> to bring imports back.</p>
     </div>
@@ -1250,11 +1274,11 @@ const FAQ_ITEMS = [
   },
   {
     q: 'How do markets resolve?',
-    a: 'Timed markets (stocks, crypto, indices, commodities, forex) settle automatically against a live price feed once their clock runs out: above the strike price at settlement pays out YES, at-or-below pays out NO. Manually created markets are resolved by an admin. Either way, every winning share pays exactly $1 and every losing share pays $0 — instantly, to every holder.',
+    a: 'Timed markets (stocks, crypto, indices, commodities, forex, weather) settle automatically against a live feed once their clock runs out: above the strike reading at settlement pays out YES, at-or-below pays out NO. Sports markets skip the clock entirely — they resolve the moment a run scores, or NO once the half-inning ends scoreless, following the real MLB game. Manually created markets are resolved by an admin. Either way, every winning share pays exactly $1 and every losing share pays $0 — instantly, to every holder.',
   },
   {
     q: "What's the timed market roster?",
-    a: 'A fixed, curated board: 12 top US stocks, the 10 most recognizable cryptocurrencies, the 4 headline US stock indices, 3 major commodities (gold, silver, crude oil), and 3 major currency pairs — each running on a fast 5-minute or 15-minute "above or below this price" clock, settling against real live market data.',
+    a: 'A fixed, curated board: 12 top US stocks, the 10 most recognizable cryptocurrencies, the 4 headline US stock indices, 3 major commodities (gold, silver, crude oil), 3 major currency pairs, and 5 major-metro temperature readings — each running on a fast 5-minute or 15-minute "above or below this reading" clock, settling against real live market/weather data. Separately, while an MLB game is live, UNICORN also opens quick "will they score this half-inning" markets with no fixed clock — see the Sports category.',
   },
   {
     q: 'What are deposit fees?',
@@ -1314,10 +1338,38 @@ function initSupportBanner() {
   }
 }
 
+// ---------- header activity pulse (sweep speeds up with site-wide trading) ----------
+//
+// Purely cosmetic, page-chrome-level state — lives outside the router, so
+// it's a plain persistent setInterval rather than one registered with
+// trackInterval() (which the router clears on every navigation; the header
+// bars span every page, so this shouldn't stop just because the route did).
+
+const ACTIVITY_POLL_MS = 5000;
+const SWEEP_DURATION_IDLE_S = 5; // matches the CSS fallback — zero recent trades, same pace as before this existed
+const SWEEP_DURATION_MIN_S = 1.1; // floor so it never spins fast enough to look broken/flickery
+
+function updateSweepSpeed(tradesLast60s) {
+  const seconds = Math.max(SWEEP_DURATION_MIN_S, SWEEP_DURATION_IDLE_S - tradesLast60s * 0.35);
+  document.documentElement.style.setProperty('--sweep-duration', `${seconds.toFixed(2)}s`);
+}
+
+async function pollActivity() {
+  try {
+    const { trades_last_60s } = await api('/api/activity', { auth: false });
+    updateSweepSpeed(trades_last_60s);
+  } catch (e) {
+    // Decorative only — a failed poll just leaves the sweep at its last
+    // known speed (or the CSS default) rather than surfacing an error.
+  }
+}
+
 // ---------- boot ----------
 
 (async function boot() {
   initSupportBanner();
+  pollActivity();
+  setInterval(pollActivity, ACTIVITY_POLL_MS);
   await refreshMe();
   renderHeader();
   navigate();

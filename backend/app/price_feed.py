@@ -27,6 +27,26 @@ TIMEOUT_SECONDS = 10
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd"
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+# Open-Meteo: free, no API key, generous rate limits — current conditions
+# only (no historical/forecast fields requested), keyed by lat/lon rather
+# than a city-name lookup so there's no geocoding step or ambiguity.
+OPEN_METEO_URL = (
+    "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+    "&current=temperature_2m&temperature_unit=fahrenheit&timezone=UTC"
+)
+
+# Internal symbol (e.g. "nyc") -> (display label, latitude, longitude). Same
+# role as SYMBOL_TO_COINGECKO_ID below: the only place a new weather city
+# needs to be taught its coordinates. Five geographically-spread major
+# metros — enough variety that at least one is usually experiencing some
+# weather movement, without turning this into a full city directory.
+WEATHER_CITIES = {
+    "nyc": ("New York City", 40.7128, -74.0060),
+    "la": ("Los Angeles", 34.0522, -118.2437),
+    "chi": ("Chicago", 41.8781, -87.6298),
+    "mia": ("Miami", 25.7617, -80.1918),
+    "den": ("Denver", 39.7392, -104.9903),
+}
 
 # Internal symbols (e.g. "BTCUSDT") stay in the Binance-style trading-pair
 # format everywhere else in the app (DB rows, question text, category
@@ -135,6 +155,22 @@ def get_forex_price(symbol: str) -> float:
     return get_commodity_price(symbol)
 
 
+def get_weather_temp(city_key: str) -> float:
+    """city_key like 'nyc' — internal short key, translated to lat/lon via
+    WEATHER_CITIES. Returns current temperature in Fahrenheit."""
+    if city_key not in WEATHER_CITIES:
+        raise PriceFeedError(f"No coordinates mapping for weather city {city_key}")
+    _, lat, lon = WEATHER_CITIES[city_key]
+    data = _fetch_json(OPEN_METEO_URL.format(lat=lat, lon=lon))
+    try:
+        temp = data["current"]["temperature_2m"]
+    except (KeyError, TypeError) as e:
+        raise PriceFeedError(f"Unexpected Open-Meteo response for {city_key}: {data}") from e
+    if temp is None:
+        raise PriceFeedError(f"No temperature_2m for {city_key}")
+    return float(temp)
+
+
 def get_price(market_type: str, symbol: str) -> float:
     if market_type == "crypto":
         return get_crypto_price(symbol)
@@ -146,4 +182,6 @@ def get_price(market_type: str, symbol: str) -> float:
         return get_index_price(symbol)
     if market_type == "forex":
         return get_forex_price(symbol)
+    if market_type == "weather":
+        return get_weather_temp(symbol)
     raise PriceFeedError(f"Unknown market_type: {market_type}")
