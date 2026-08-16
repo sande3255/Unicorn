@@ -161,6 +161,7 @@ function renderHeader() {
   const links = [
     ['#/markets', 'Markets'],
     ['#/leaderboard', 'Leaderboard'],
+    ['#/faq', 'Rules & FAQ'],
   ];
   if (state.user) links.push(['#/portfolio', 'Portfolio']);
   if (state.user) links.push(['#/history', 'History']);
@@ -197,6 +198,7 @@ const routes = [
   { pattern: /^#\/account$/, handler: renderAccount, auth: true, title: 'Account' },
   { pattern: /^#\/admin$/, handler: renderAdmin, admin: true, title: 'Admin' },
   { pattern: /^#\/login$/, handler: renderLogin, title: 'Log in' },
+  { pattern: /^#\/faq$/, handler: renderFaq, title: 'Rules & FAQ' },
 ];
 
 // Distinct <title> per page so multiple UNICORN tabs are tellable apart in
@@ -422,6 +424,11 @@ async function renderMarketDetail(idStr) {
           <h2>YES price history</h2>
           <div id="chart-wrap" style="position:relative;"></div>
         </div>
+        <div class="card" id="comments-card">
+          <h2>Discussion</h2>
+          <div id="comments-form-area"></div>
+          <div id="comments-list">Loading…</div>
+        </div>
       </div>
       <div>
         <div class="card trade-widget">
@@ -432,8 +439,11 @@ async function renderMarketDetail(idStr) {
     </div>
   `;
 
-  renderPriceChart(document.getElementById('chart-wrap'), m.price_history, m.price_yes);
+  renderPriceChart(document.getElementById('chart-wrap'), m.price_history, m.price_yes, { isOpen });
   renderTradeWidget(document.getElementById('trade-area'), m);
+  renderCommentForm(id);
+  await loadAndRenderComments(id);
+  trackInterval(setInterval(() => loadAndRenderComments(id), 15000));
 
   if (isOpen) {
     trackInterval(setInterval(() => {
@@ -461,7 +471,7 @@ async function renderMarketDetail(idStr) {
       const underlyingEl = document.getElementById('live-underlying-price');
       if (underlyingEl) underlyingEl.textContent = isImported ? fmtPct(fresh.current_price) : fmtUnderlyingPrice(fresh.current_price);
       const chartWrap = document.getElementById('chart-wrap');
-      if (chartWrap) renderPriceChart(chartWrap, fresh.price_history, fresh.price_yes);
+      if (chartWrap) renderPriceChart(chartWrap, fresh.price_history, fresh.price_yes, { isOpen: true });
       const pickYes = document.getElementById('pick-yes');
       const pickNo = document.getElementById('pick-no');
       if (pickYes && pickNo) {
@@ -548,7 +558,7 @@ function renderTradeWidget(container, market) {
       updatePreview();
       const fresh = await api(`/api/markets/${market.id}`, { auth: false });
       const chartWrap = document.getElementById('chart-wrap');
-      if (chartWrap) renderPriceChart(chartWrap, fresh.price_history, fresh.price_yes);
+      if (chartWrap) renderPriceChart(chartWrap, fresh.price_history, fresh.price_yes, { isOpen: true });
     } catch (e) {
       errorEl.textContent = e.message;
       errorEl.style.display = 'block';
@@ -556,9 +566,92 @@ function renderTradeWidget(container, market) {
   };
 }
 
+// ---------- comments (per-market discussion) ----------
+
+const COMMENT_MAX_LENGTH = 500;
+
+function renderCommentForm(marketId) {
+  const el = document.getElementById('comments-form-area');
+  if (!el) return;
+  if (!state.user) {
+    el.innerHTML = `<p class="muted">Log in to join the discussion. <a href="#/login">Log in / Sign up</a></p>`;
+    return;
+  }
+  el.innerHTML = `
+    <form id="comment-form">
+      <textarea id="comment-body" rows="2" maxlength="${COMMENT_MAX_LENGTH}" placeholder="Say something about this market…"></textarea>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;">
+        <span class="muted" id="comment-count" style="font-size:12px;">0 / ${COMMENT_MAX_LENGTH}</span>
+        <button class="primary" type="submit">Post</button>
+      </div>
+      <div class="error-text" id="comment-error" style="display:none;"></div>
+    </form>
+  `;
+  const bodyInput = document.getElementById('comment-body');
+  const countEl = document.getElementById('comment-count');
+  bodyInput.oninput = () => { countEl.textContent = `${bodyInput.value.length} / ${COMMENT_MAX_LENGTH}`; };
+  document.getElementById('comment-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('comment-error');
+    errorEl.style.display = 'none';
+    const body = bodyInput.value.trim();
+    if (!body) { errorEl.textContent = 'Comment cannot be empty.'; errorEl.style.display = 'block'; return; }
+    try {
+      await api(`/api/markets/${marketId}/comments`, { method: 'POST', body: { body } });
+      bodyInput.value = '';
+      countEl.textContent = `0 / ${COMMENT_MAX_LENGTH}`;
+      await loadAndRenderComments(marketId);
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = 'block';
+    }
+  };
+}
+
+async function loadAndRenderComments(marketId) {
+  const listEl = document.getElementById('comments-list');
+  if (!listEl) return; // navigated away
+  let comments;
+  try {
+    comments = await api(`/api/markets/${marketId}/comments`, { auth: false });
+  } catch (e) {
+    listEl.innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (!document.getElementById('comments-list')) return; // navigated away mid-fetch
+  if (comments.length === 0) {
+    listEl.innerHTML = `<p class="muted" style="margin:8px 0 0;">No comments yet — be the first.</p>`;
+    return;
+  }
+  listEl.innerHTML = comments.map(c => {
+    const canDelete = state.user && (state.user.username === c.username || state.user.is_admin);
+    return `
+    <div class="comment-item">
+      <div class="comment-meta">
+        <strong>${escapeHtml(c.username)}</strong>
+        <span class="muted">${fmtTime(c.created_at)}</span>
+        ${canDelete ? `<button type="button" class="link-btn comment-delete-btn" data-id="${c.id}">delete</button>` : ''}
+      </div>
+      <div class="comment-body">${escapeHtml(c.body)}</div>
+    </div>`;
+  }).join('');
+  listEl.querySelectorAll('.comment-delete-btn').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm('Delete this comment?')) return;
+      try {
+        await api(`/api/comments/${btn.dataset.id}`, { method: 'DELETE' });
+        await loadAndRenderComments(marketId);
+      } catch (e) {
+        alert(e.message);
+      }
+    };
+  });
+}
+
 // ---------- hand-rolled SVG price chart (no external chart library) ----------
 
-function renderPriceChart(container, history, currentPrice) {
+function renderPriceChart(container, history, currentPrice, opts = {}) {
+  const isOpen = !!opts.isOpen;
   const points = (history && history.length > 0) ? history : [{ t: new Date().toISOString(), price: currentPrice }];
   const w = container.clientWidth > 0 ? container.clientWidth : 560;
   const h = 220;
@@ -578,19 +671,48 @@ function renderPriceChart(container, history, currentPrice) {
   // A single point (e.g. a freshly-seeded market with no trades yet) has no
   // line segment to stroke — draw it as a flat line across the plot at that
   // price instead of silently rendering nothing.
+  const lastX = points.length === 1 ? (w - padR) : xForIndex(points.length - 1);
   const path = points.length === 1
-    ? `M ${padL} ${yForPrice(points[0].price).toFixed(1)} L ${(w - padR).toFixed(1)} ${yForPrice(points[0].price).toFixed(1)}`
+    ? `M ${padL} ${yForPrice(points[0].price).toFixed(1)} L ${lastX.toFixed(1)} ${yForPrice(points[0].price).toFixed(1)}`
     : points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${xForIndex(i).toFixed(1)} ${yForPrice(pt.price).toFixed(1)}`).join(' ');
+
+  // Same path, closed down to the baseline and back — a soft top-to-bottom
+  // fade under the line instead of a flat block, so it reads as a glow.
+  const baselineY = padT + plotH;
+  const areaPath = `${path} L ${lastX.toFixed(1)} ${baselineY} L ${padL} ${baselineY} Z`;
+
+  const prices = points.map(pt => pt.price);
+  const rangeCaption = points.length > 1
+    ? `<div class="chart-range muted">Range ${fmtPct(Math.min(...prices))}–${fmtPct(Math.max(...prices))} · ${points.length} price point${points.length === 1 ? '' : 's'}</div>`
+    : '';
+
+  // A gently pulsing dot on the most recent point for an open market — a
+  // quick visual "this is still live", distinct from the static hover dot
+  // (which only appears on mouseover, see below).
+  const lastY = yForPrice(points[points.length - 1].price);
+  const liveDot = isOpen
+    ? `<circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="8" fill="var(--series-1)" opacity="0.25" class="chart-live-pulse"/>
+       <circle cx="${lastX.toFixed(1)}" cy="${lastY.toFixed(1)}" r="3.5" fill="var(--series-1)" stroke="var(--page)" stroke-width="1.5"/>`
+    : '';
 
   const svg = `
     <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" role="img" aria-label="YES price history chart">
+      <defs>
+        <linearGradient id="chart-area-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" style="stop-color:var(--series-1);stop-opacity:0.28"/>
+          <stop offset="100%" style="stop-color:var(--series-1);stop-opacity:0"/>
+        </linearGradient>
+      </defs>
       ${gridLines}
       <line x1="${padL}" y1="${padT + plotH}" x2="${w - padR}" y2="${padT + plotH}" stroke="var(--baseline)" stroke-width="1"/>
+      <path d="${areaPath}" fill="url(#chart-area-fill)" stroke="none"/>
       <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      ${liveDot}
       <circle id="chart-hover-dot" cx="0" cy="0" r="4" fill="var(--series-1)" style="display:none;"/>
       <line id="chart-hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="var(--baseline)" stroke-width="1" style="display:none;"/>
       <rect id="chart-hover-target" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent" />
     </svg>
+    ${rangeCaption}
     <div id="chart-tooltip" class="chart-tooltip" style="display:none;"></div>
   `;
   container.innerHTML = svg;
@@ -661,15 +783,44 @@ async function renderPortfolio() {
 
 // ---------- leaderboard ----------
 
+const LEADERBOARD_BOARD_OPTIONS = [
+  { value: 'all', label: 'All traders' },
+  { value: 'humans', label: 'Humans' },
+  { value: 'bots', label: 'Bots' },
+];
+let leaderboardBoard = 'all';
+
 async function renderLeaderboard() {
+  leaderboardBoard = 'all';
   appEl.innerHTML = `
     <h1>Leaderboard</h1>
-    <p class="muted">Top traders ranked by net worth — cash balance plus the current value of open positions. Play money only; resets never happen automatically.</p>
+    <p class="muted">Top traders ranked by net worth — cash balance plus the current value of open positions. Play money only; resets never happen automatically. "Bots" is any account that's ever placed a trade using an <a href="#/faq">API key</a> instead of logging in by hand.</p>
+    <div class="chip-row" id="board-chips" style="margin-bottom:14px;">
+      ${LEADERBOARD_BOARD_OPTIONS.map(o => `<button type="button" class="chip${o.value === leaderboardBoard ? ' selected' : ''}" data-board="${o.value}">${o.label}</button>`).join('')}
+    </div>
     <div id="leaderboard-body">Loading…</div>`;
-  const rows = await api('/api/leaderboard', { auth: false });
+  document.querySelectorAll('#board-chips .chip').forEach(btn => {
+    btn.onclick = () => {
+      if (btn.dataset.board === leaderboardBoard) return;
+      leaderboardBoard = btn.dataset.board;
+      document.querySelectorAll('#board-chips .chip').forEach(c => c.classList.toggle('selected', c === btn));
+      loadAndRenderLeaderboard();
+    };
+  });
+  await loadAndRenderLeaderboard();
+}
+
+async function loadAndRenderLeaderboard() {
   const body = document.getElementById('leaderboard-body');
+  if (!body) return; // navigated away
+  body.innerHTML = 'Loading…';
+  const qs = leaderboardBoard === 'all' ? '' : `?board=${leaderboardBoard}`;
+  const rows = await api(`/api/leaderboard${qs}`, { auth: false });
+  if (!document.getElementById('leaderboard-body')) return; // navigated away mid-fetch
   if (rows.length === 0) {
-    body.innerHTML = `<div class="empty-state">No traders yet. <a href="#/login">Sign up</a> to be the first.</div>`;
+    body.innerHTML = leaderboardBoard === 'bots'
+      ? `<div class="empty-state">No bot-driven accounts yet — trade via an <a href="#/api-keys">API key</a> to be the first.</div>`
+      : `<div class="empty-state">No traders yet. <a href="#/login">Sign up</a> to be the first.</div>`;
     return;
   }
   body.innerHTML = `
@@ -906,8 +1057,8 @@ async function renderAdmin() {
       <div id="deposits-summary">Loading…</div>
     </div>
     <div class="card">
-      <h2>Live timed markets — a fixed roster of 48 (stocks, crypto &amp; indices)</h2>
-      <p class="muted">A curated, definitive board of well-known American names: 12 top US stocks (5-min and 15-min), the 10 most recognizable cryptocurrencies (5-min and 15-min), and the 4 headline US stock indices (15-min) — 48 templates total, all the same "will it be above or below this price" fast win-or-lose format, settling against real live prices. Nothing to do here; the background scheduler manages them. Edit <code>backend/app/scheduler.py</code>'s <code>AUTO_MARKET_CONFIGS</code> to change the roster.</p>
+      <h2>Live timed markets — a fixed roster of 54 (stocks, crypto, indices, commodities &amp; forex)</h2>
+      <p class="muted">A curated, definitive board of well-known American names: 12 top US stocks (5-min and 15-min), the 10 most recognizable cryptocurrencies (5-min and 15-min), the 4 headline US stock indices (15-min), 3 major commodities (gold/silver/crude, 15-min), and 3 major currency pairs (15-min) — 54 templates total, all the same "will it be above or below this price" fast win-or-lose format, settling against real live prices. Nothing to do here; the background scheduler manages them. Edit <code>backend/app/scheduler.py</code>'s <code>AUTO_MARKET_CONFIGS</code> to change the roster.</p>
       <h2 style="margin-top:16px;">Kalshi &amp; Polymarket imports — off by default</h2>
       <p class="muted">UNICORN can still pull in trending real-world markets from Kalshi/Polymarket, but that's switched off out of the box (<code>EXTERNAL_IMPORT_MAX_OPEN_TOTAL = 0</code>) to keep the board 100% fast, definitive markets — no slow real-world events to wait hours or days on. Set it above 0 in <code>backend/app/scheduler.py</code> to bring imports back.</p>
     </div>
@@ -1084,6 +1235,58 @@ function renderLogin() {
       walletErrorEl.style.display = 'block';
     }
   };
+}
+
+// ---------- rules & FAQ ----------
+
+const FAQ_ITEMS = [
+  {
+    q: 'Is this real money?',
+    a: 'No — never. Every balance is play money that starts at $10,000 on signup. Nothing in UNICORN moves real dollars, real crypto, or anything else of real value, and there is currently no way to cash out. See the DEMO banner at the top of every page and the README for the full disclaimer.',
+  },
+  {
+    q: 'How does pricing work?',
+    a: 'Each market runs on an LMSR (Logarithmic Market Scoring Rule) automated market maker — the same style of mechanism real prediction-market platforms use. Buying YES shares pushes the YES price up; buying NO pushes it down. The "liquidity parameter" (b) controls how much a given trade moves the price — deeper liquidity means smaller price moves per trade.',
+  },
+  {
+    q: 'How do markets resolve?',
+    a: 'Timed markets (stocks, crypto, indices, commodities, forex) settle automatically against a live price feed once their clock runs out: above the strike price at settlement pays out YES, at-or-below pays out NO. Manually created markets are resolved by an admin. Either way, every winning share pays exactly $1 and every losing share pays $0 — instantly, to every holder.',
+  },
+  {
+    q: "What's the timed market roster?",
+    a: 'A fixed, curated board: 12 top US stocks, the 10 most recognizable cryptocurrencies, the 4 headline US stock indices, 3 major commodities (gold, silver, crude oil), and 3 major currency pairs — each running on a fast 5-minute or 15-minute "above or below this price" clock, settling against real live market data.',
+  },
+  {
+    q: 'What are deposit fees?',
+    a: `Deposits model a ${DEPOSIT_FEE_LABEL} fee on top of the amount you "deposit" — this is play money, so nothing is actually charged, but it mirrors the fee shape a real payment processor would take, so the economics are visible before any of this ever touches real funds.`,
+  },
+  {
+    q: 'Can bots trade here?',
+    a: 'Yes — generate an API key from the API keys page and trade programmatically using the same REST API the frontend uses. Full docs and a Python SDK live in API.md. Any account that ever places a trade with an API key shows up on the Bots tab of the Leaderboard from then on, separate from human traders.',
+  },
+  {
+    q: 'What does "Connect wallet" actually do?',
+    a: "It's login-only. Signing a one-time message with MetaMask (or another browser wallet) proves you control that address and links or authenticates your UNICORN account with it — no real crypto ever moves, and your balance stays UNICORN's own play money either way.",
+  },
+  {
+    q: 'Is UNICORN registered with any regulator?',
+    a: "No. UNICORN is a demo, not a registered exchange, broker, or money transmitter, and it doesn't offer real-money trading. It is not affiliated with Kalshi, Polymarket, or any other real trading platform.",
+  },
+];
+
+function renderFaq() {
+  appEl.innerHTML = `
+    <h1>Rules &amp; FAQ</h1>
+    <p class="muted">The short version of how UNICORN works, and what it is (and isn't).</p>
+    <div class="faq-list">
+      ${FAQ_ITEMS.map(item => `
+        <details class="card faq-item">
+          <summary>${escapeHtml(item.q)}</summary>
+          <p>${item.a}</p>
+        </details>
+      `).join('')}
+    </div>
+  `;
 }
 
 // ---------- support banner ----------

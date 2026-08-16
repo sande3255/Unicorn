@@ -620,6 +620,12 @@ def trade(market_id):
         (user["id"], market_id, outcome, shares, -cost, new_balance),
     )
     conn.execute("INSERT INTO price_points (market_id, price_yes) VALUES (?, ?)", (market_id, new_price))
+    # One-way flip, never cleared: the moment an account has ever placed a
+    # trade over the API (bot credentials, not a logged-in session), it
+    # counts as a "bot" for the public bot leaderboard from then on — see
+    # is_bot_trader's migration comment in db.py.
+    if getattr(g, "auth_method", None) == "api_key" and not user["is_bot_trader"]:
+        conn.execute("UPDATE users SET is_bot_trader = 1 WHERE id = ?", (user["id"],))
     conn.commit()
 
     return jsonify({
@@ -677,10 +683,25 @@ def portfolio():
 
 @app.get("/api/leaderboard")
 def leaderboard():
+    """Optional ?board=humans or ?board=bots narrows to accounts that have
+    (respectively) never or ever traded via an API key (see is_bot_trader).
+    Omitting it keeps the original behavior — every non-admin account,
+    human and bot alike — so existing bots/scripts polling this endpoint
+    unchanged keep seeing what they've always seen."""
+    board = request.args.get("board")
     conn = db.get_db()
-    users = conn.execute(
-        "SELECT id, username, balance FROM users WHERE is_admin = 0"
-    ).fetchall()
+    if board == "bots":
+        users = conn.execute(
+            "SELECT id, username, balance FROM users WHERE is_admin = 0 AND is_bot_trader = 1"
+        ).fetchall()
+    elif board == "humans":
+        users = conn.execute(
+            "SELECT id, username, balance FROM users WHERE is_admin = 0 AND is_bot_trader = 0"
+        ).fetchall()
+    else:
+        users = conn.execute(
+            "SELECT id, username, balance FROM users WHERE is_admin = 0"
+        ).fetchall()
     pos_rows = conn.execute(
         "SELECT positions.user_id, positions.shares_yes, positions.shares_no, "
         "markets.status AS m_status, markets.resolved_outcome AS m_resolved_outcome, "
@@ -734,6 +755,81 @@ def transactions():
         "market_question": r["market_question"],
     } for r in rows]
     return jsonify(out)
+
+
+# ---------- comments (per-market discussion) ----------
+
+COMMENT_MAX_LENGTH = 500
+
+
+def _serialize_comment(row):
+    return {
+        "id": row["id"],
+        "market_id": row["market_id"],
+        "user_id": row["user_id"],
+        "username": row["username"],
+        "body": row["body"],
+        "created_at": row["created_at"],
+    }
+
+
+@app.get("/api/markets/<int:market_id>/comments")
+@rate_limit(120, 60)
+def list_comments(market_id):
+    conn = db.get_db()
+    m = conn.execute("SELECT id FROM markets WHERE id = ?", (market_id,)).fetchone()
+    if not m:
+        return jsonify({"detail": "Market not found"}), 404
+    rows = conn.execute(
+        "SELECT comments.*, users.username FROM comments "
+        "JOIN users ON users.id = comments.user_id "
+        "WHERE comments.market_id = ? ORDER BY comments.created_at DESC LIMIT 200",
+        (market_id,),
+    ).fetchall()
+    return jsonify([_serialize_comment(r) for r in rows])
+
+
+@app.post("/api/markets/<int:market_id>/comments")
+@require_auth
+@rate_limit(10, 60)
+def create_comment(market_id):
+    data = request.get_json(force=True, silent=True) or {}
+    body = (data.get("body") or "").strip()
+    if not body:
+        return jsonify({"detail": "Comment cannot be empty"}), 400
+    if len(body) > COMMENT_MAX_LENGTH:
+        return jsonify({"detail": f"Comment must be {COMMENT_MAX_LENGTH} characters or fewer"}), 400
+
+    conn = db.get_db()
+    m = conn.execute("SELECT id FROM markets WHERE id = ?", (market_id,)).fetchone()
+    if not m:
+        return jsonify({"detail": "Market not found"}), 404
+
+    cur = conn.execute(
+        "INSERT INTO comments (market_id, user_id, body) VALUES (?, ?, ?)",
+        (market_id, g.user["id"], body),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT comments.*, users.username FROM comments JOIN users ON users.id = comments.user_id "
+        "WHERE comments.id = ?",
+        (cur.lastrowid,),
+    ).fetchone()
+    return jsonify(_serialize_comment(row))
+
+
+@app.delete("/api/comments/<int:comment_id>")
+@require_auth
+def delete_comment(comment_id):
+    conn = db.get_db()
+    row = conn.execute("SELECT * FROM comments WHERE id = ?", (comment_id,)).fetchone()
+    if row is None:
+        return jsonify({"detail": "Comment not found"}), 404
+    if row["user_id"] != g.user["id"] and not g.user["is_admin"]:
+        return jsonify({"detail": "You can only delete your own comments"}), 403
+    conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+    conn.commit()
+    return jsonify({"deleted": True})
 
 
 @app.get("/api/health")

@@ -27,16 +27,16 @@ EXTERNAL_SYNC_EVERY_N_TICKS = 20
 EXTERNAL_LIQUIDITY_B = 150
 
 # UNICORN's board is a fixed, curated roster of well-known American names —
-# top US stocks, the US stock indices, and the handful of cryptocurrencies
-# most Americans have actually heard of — each offered as a fast 5-minute
-# and/or 15-minute "will it be above or below this price" market. No long
-# tail of obscure altcoins, no slow-moving real-world event markets that
-# take hours or days to settle (nobody's sitting around waiting on a
-# baseball game). Every open slot on the board is a definitive, short-clock
-# win-or-lose call. Kalshi/Polymarket real-world imports are disabled
-# entirely (see EXTERNAL_IMPORT_MAX_OPEN_TOTAL) to keep the board 100% fast
-# markets. This list is intentionally capped under 50 templates total —
-# add/remove symbols here to keep it that way.
+# top US stocks, the US stock indices, a handful of major commodities and
+# currency pairs, and the cryptocurrencies most Americans have actually
+# heard of — each offered as a fast 5-minute and/or 15-minute "will it be
+# above or below this price" market. No long tail of obscure altcoins, no
+# slow-moving real-world event markets that take hours or days to settle
+# (nobody's sitting around waiting on a baseball game). Every open slot on
+# the board is a definitive, short-clock win-or-lose call. Kalshi/Polymarket
+# real-world imports are disabled entirely (see EXTERNAL_IMPORT_MAX_OPEN_TOTAL)
+# to keep the board 100% fast markets. This list is intentionally capped
+# under 60 templates total — add/remove symbols here to keep it that way.
 EXTERNAL_IMPORT_MAX_OPEN_TOTAL = 0
 
 # Top 10 cryptocurrencies by name recognition among US traders — same list
@@ -57,6 +57,15 @@ _FIFTEEN_MIN_INDICES = [
     ("^DJI", "Dow Jones"), ("^RUT", "Russell 2000"),
 ]
 
+# A handful of the most widely-recognized commodities and currency pairs —
+# both already fully supported by price_feed.py's generic Yahoo Finance
+# lookup (get_commodity_price/get_forex_price), just never wired into the
+# board's roster until now. 15-min only: both move more slowly tick-to-tick
+# than crypto, so a 5-min clock would mostly just recreate the same
+# strike/settlement pair back to back.
+_COMMODITIES = [("GC=F", "Gold"), ("SI=F", "Silver"), ("CL=F", "Crude Oil")]
+_FOREX = [("EURUSD=X", "EUR/USD"), ("GBPUSD=X", "GBP/USD"), ("USDJPY=X", "USD/JPY")]
+
 # Top 12 US mega-cap stocks, used for both the 5-min and 15-min stock
 # boards (same symbol list both cadences, mirroring the crypto list above).
 _STOCKS = ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO",
@@ -68,8 +77,9 @@ _STOCK_LABELS = {
 }
 
 # The menu of recurring markets. Add/remove entries here to change what's
-# offered — kept to a fixed, definitive roster (48 templates total: 12
-# stocks x2 durations, 10 crypto x2 durations, 4 indices x1 duration).
+# offered — kept to a fixed, definitive roster (54 templates total: 12
+# stocks x2 durations, 10 crypto x2 durations, 4 indices, 3 commodities,
+# and 3 forex pairs, the last three all x1 duration).
 AUTO_MARKET_CONFIGS = (
     [
         {"market_type": "stock", "symbol": sym, "label": _STOCK_LABELS[sym], "duration_minutes": 5,
@@ -91,6 +101,14 @@ AUTO_MARKET_CONFIGS = (
         {"market_type": "index", "symbol": sym, "label": label, "duration_minutes": 15,
          "category": "Indices · 15 min", "b": 120}
         for sym, label in _FIFTEEN_MIN_INDICES
+    ] + [
+        {"market_type": "commodity", "symbol": sym, "label": label, "duration_minutes": 15,
+         "category": "Commodities · 15 min", "b": 100}
+        for sym, label in _COMMODITIES
+    ] + [
+        {"market_type": "forex", "symbol": sym, "label": label, "duration_minutes": 15,
+         "category": "Forex · 15 min", "b": 100}
+        for sym, label in _FOREX
     ]
 )
 

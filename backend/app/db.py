@@ -100,6 +100,16 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked_at TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    body TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (market_id) REFERENCES markets(id),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
 """
 
 
@@ -148,6 +158,13 @@ USER_COLUMN_MIGRATIONS = [
     # linked a wallet just has NULL here, same as before this column
     # existed. See app/wallet_auth.py for the link/login flow.
     ("wallet_address", "TEXT"),
+    # Flipped to 1 the first time this account ever places a trade
+    # authenticated via an API key rather than a session token (see
+    # trade() in server.py). Drives the public bot leaderboard — an
+    # account only ever needs to trade programmatically once to count as
+    # a "bot" from then on, even if a human later also logs in and trades
+    # the same account by hand.
+    ("is_bot_trader", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 TRANSACTION_COLUMN_MIGRATIONS = [
@@ -197,6 +214,11 @@ def _migrate(conn):
     for name, coltype in TRANSACTION_COLUMN_MIGRATIONS:
         if name not in existing_txn_cols:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {name} {coltype}")
+
+    # Every comment list/insert filters or sorts by (market_id, created_at) —
+    # see list_comments()/create_comment() in server.py.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id, created_at)")
+
     conn.commit()
 
 
