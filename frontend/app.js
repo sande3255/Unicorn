@@ -356,7 +356,7 @@ function renderFilteredMarketsList() {
   listEl.innerHTML = filtered.map(m => {
     const isTimedFeed = m.is_auto && (m.market_type === 'crypto' || m.market_type === 'commodity' || m.market_type === 'stock' || m.market_type === 'index' || m.market_type === 'forex' || m.market_type === 'weather');
     const isImported = m.is_auto && (m.market_type === 'kalshi' || m.market_type === 'polymarket');
-    const isSportsLive = m.is_auto && m.market_type === 'sports';
+    const isSportsLive = m.is_auto && (m.market_type === 'sports' || m.market_type === 'odds');
     const statusBit = m.status === 'resolved'
       ? `<span class="tag resolved">Resolved ${m.resolved_outcome}</span>`
       : (isTimedFeed ? `<span class="tag ${countdownUrgencyClass(m.close_time)}" data-countdown="${escapeHtml(m.close_time || '')}">closes in …</span>`
@@ -401,7 +401,7 @@ async function renderMarketDetail(idStr) {
   const isOpen = m.status === 'open';
   const isTimedFeed = m.is_auto && (m.market_type === 'crypto' || m.market_type === 'commodity' || m.market_type === 'stock' || m.market_type === 'index' || m.market_type === 'forex' || m.market_type === 'weather');
   const isImported = m.is_auto && (m.market_type === 'kalshi' || m.market_type === 'polymarket');
-  const isSportsLive = m.is_auto && m.market_type === 'sports';
+  const isSportsLive = m.is_auto && (m.market_type === 'sports' || m.market_type === 'odds');
   const underlyingLabel = m.market_type === 'weather' ? 'temperature' : 'price';
 
   let liveBlock = '';
@@ -427,10 +427,15 @@ async function renderMarketDetail(idStr) {
       ${m.source_url ? `<p style="margin:8px 0 0;"><a href="${escapeHtml(m.source_url)}" target="_blank" rel="noopener">View original on ${sourceName} ↗</a></p>` : ''}
     </div>`;
   } else if (isSportsLive) {
+    const isOdds = m.market_type === 'odds';
     liveBlock = `
     <div class="card" id="live-price-card">
-      <h2>Live from MLB</h2>
-      <p class="muted" style="margin:0;">${isOpen ? 'No fixed clock — this resolves the moment the half-inning is decided, following the real game.' : 'This half-inning has been decided.'}</p>
+      <h2>${isOdds ? 'Live moneyline, seeded at real sportsbook odds' : 'Live from MLB'}</h2>
+      <p class="muted" style="margin:0;">${isOpen
+        ? (isOdds
+          ? 'No fixed clock — this resolves the moment the final score is in, following the real game.'
+          : 'No fixed clock — this resolves the moment the half-inning is decided, following the real game.')
+        : (isOdds ? 'This game has been decided.' : 'This half-inning has been decided.')}</p>
     </div>`;
   }
 
@@ -1083,6 +1088,8 @@ async function renderAdmin() {
       <p class="muted">A curated, definitive board of well-known American names: 12 top US stocks (5-min and 15-min), the 10 most recognizable cryptocurrencies (5-min and 15-min), the 4 headline US stock indices (15-min), 3 major commodities (gold/silver/crude, 15-min), 3 major currency pairs (15-min), and 5 major-metro temperature readings (15-min) — 59 templates total, all the same "will it be above or below this reading" fast win-or-lose format, settling against real live prices/temperatures. Nothing to do here; the background scheduler manages them. Edit <code>backend/app/scheduler.py</code>'s <code>AUTO_MARKET_CONFIGS</code> to change the roster.</p>
       <h2 style="margin-top:16px;">Sports — live MLB half-innings, no fixed clock</h2>
       <p class="muted">Separate from the fixed roster above: while an MLB game is live, UNICORN opens a market for the current half-inning ("Will the Yankees score in the bottom of the 9th?") sourced from MLB's public Stats API, and resolves it the moment a run scores or the half-inning ends scoreless — no fixed 5/15-min clock, it just follows the real game. See <code>sports_tick()</code> in <code>backend/app/scheduler.py</code> and <code>backend/app/sports_feed.py</code>.</p>
+      <h2 style="margin-top:16px;">Moneylines — NFL/NBA/MLB/NHL, seeded at real sportsbook odds</h2>
+      <p class="muted">Also separate from the fixed roster: for upcoming/live games in the four major US leagues, UNICORN opens a "will the home team win" market seeded at the real, de-vigged implied probability from live sportsbook odds (via The Odds API), and resolves it once the final score is in. Needs an <code>ODDS_API_KEY</code> environment variable — silently does nothing without one, same as the Kalshi/Polymarket imports below being off by default. This is the one feed here backed by a metered API, so it syncs roughly hourly rather than every tick; see <code>odds_tick()</code> in <code>backend/app/scheduler.py</code> and <code>backend/app/odds_feed.py</code>.</p>
       <h2 style="margin-top:16px;">Kalshi &amp; Polymarket imports — off by default</h2>
       <p class="muted">UNICORN can still pull in trending real-world markets from Kalshi/Polymarket, but that's switched off out of the box (<code>EXTERNAL_IMPORT_MAX_OPEN_TOTAL = 0</code>) to keep the board 100% fast, definitive markets — no slow real-world events to wait hours or days on. Set it above 0 in <code>backend/app/scheduler.py</code> to bring imports back.</p>
     </div>

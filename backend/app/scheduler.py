@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 
-from . import db, price_feed, external_markets, sports_feed, amm
+from . import db, price_feed, external_markets, sports_feed, odds_feed, amm
 from .resolution import apply_resolution
 
 TICK_SECONDS = 15
@@ -317,6 +317,103 @@ def sports_tick(conn, games_fetcher=sports_feed.get_live_games,
         log(f"[scheduler] opened sports market #{market_id}: {question}")
 
 
+# Needs ODDS_API_KEY (see odds_feed.py) — quietly does nothing if it isn't
+# set, same as EXTERNAL_IMPORT_MAX_OPEN_TOTAL = 0 disabling Kalshi/
+# Polymarket imports. Bounded like SPORTS_MAX_OPEN, for the same reason.
+ODDS_MAX_OPEN = 20
+ODDS_LIQUIDITY_B = 120
+
+
+def odds_tick(conn, odds_fetcher=odds_feed.get_upcoming_odds, scores_fetcher=odds_feed.get_scores, log=print):
+    """Auto-resolves open moneyline ('odds') markets once their game is
+    final, then opens fresh ones for upcoming games at each sport's real,
+    de-vigged moneyline probability. Every odds market's `symbol` column
+    holds the odds-API event id — same "external id lives in `symbol`"
+    convention as sports_tick()/kalshi/polymarket imports elsewhere in
+    this file. Silently does nothing if ODDS_API_KEY isn't configured.
+
+    This is the one feed in this app backed by a metered API — see the
+    cadence comment on ODDS_SYNC_EVERY_N_TICKS below before tightening it."""
+    if not odds_feed.ODDS_API_KEY:
+        return
+
+    open_rows = conn.execute(
+        "SELECT * FROM markets WHERE is_auto = 1 AND status = 'open' AND market_type = 'odds'"
+    ).fetchall()
+    # Which sport a given open market belongs to isn't stored on the row
+    # (no spare column for it), so rather than track that, just check
+    # every configured sport's scores once per tick and match by event id.
+    open_by_event = {row["symbol"]: row for row in open_rows}
+
+    if open_by_event:
+        for sport_key in odds_feed.SPORT_KEYS:
+            try:
+                scores = scores_fetcher(sport_key)
+            except odds_feed.OddsFeedError as e:
+                log(f"[scheduler] odds scores fetch failed for {sport_key}: {e}")
+                continue
+            for event_id, result in scores.items():
+                row = open_by_event.get(event_id)
+                if row is None or not result["completed"]:
+                    continue
+                if result["home_score"] is None or result["away_score"] is None:
+                    continue  # completed but no final score posted yet — wait for next tick
+                outcome = "YES" if result["home_score"] > result["away_score"] else "NO"
+                res = apply_resolution(conn, row["id"], outcome,
+                                        settlement_price=1.0 if outcome == "YES" else 0.0)
+                if res is not None:
+                    log(f"[scheduler] resolved odds market #{row['id']} as {outcome} "
+                        f"({result['home_score']}-{result['away_score']})")
+
+    currently_open = conn.execute(
+        "SELECT COUNT(*) c FROM markets WHERE is_auto = 1 AND status = 'open' AND market_type = 'odds'"
+    ).fetchone()["c"]
+    if currently_open >= ODDS_MAX_OPEN:
+        return
+    for sport_key, league_label in odds_feed.SPORT_KEYS.items():
+        if currently_open >= ODDS_MAX_OPEN:
+            break
+        try:
+            games = odds_fetcher(sport_key)
+        except odds_feed.OddsFeedError as e:
+            log(f"[scheduler] odds fetch failed for {sport_key}: {e}")
+            continue
+        for game in games:
+            if currently_open >= ODDS_MAX_OPEN:
+                break
+            exists = conn.execute(
+                "SELECT id FROM markets WHERE market_type = 'odds' AND symbol = ? LIMIT 1",
+                (game["event_id"],),
+            ).fetchone()
+            if exists:
+                continue
+            prob = game["home_prob"]
+            if prob is None or not (0.01 < prob < 0.99):
+                continue
+            question = f"Will the {game['home_team']} beat the {game['away_team']}?"
+            description = (
+                f"{league_label} moneyline market, seeded at the real de-vigged implied "
+                f"probability from live sportsbook odds. Resolves YES if the {game['home_team']} "
+                f"win, NO otherwise — no fixed clock; settlement just follows the real final score."
+            )
+            q_yes, q_no = amm.seed_shares_for_price(prob, ODDS_LIQUIDITY_B)
+            cur = conn.execute(
+                "INSERT INTO markets (question, description, category, status, b, q_yes, q_no, "
+                "is_auto, market_type, symbol, symbol_label) "
+                "VALUES (?, ?, ?, 'open', ?, ?, ?, 1, 'odds', ?, ?)",
+                (question, description, f"{league_label} · Moneyline", ODDS_LIQUIDITY_B,
+                 q_yes, q_no, game["event_id"], game["home_team"]),
+            )
+            market_id = cur.lastrowid
+            conn.execute(
+                "INSERT INTO price_points (market_id, price_yes) VALUES (?, ?)",
+                (market_id, amm.price_yes(q_yes, q_no, ODDS_LIQUIDITY_B)),
+            )
+            conn.commit()
+            currently_open += 1
+            log(f"[scheduler] opened odds market #{market_id} at {prob*100:.0f}% home-win: {question}")
+
+
 def _import_source(conn, source_name, listed_markets, budget, log=print):
     """Imports at most `budget` new markets from this source. Returns how
     many it actually imported, so the caller can debit a shared budget."""
@@ -428,10 +525,21 @@ def sync_external_markets(
 # within half a minute. 2 ticks * 15s = ~30s.
 SPORTS_SYNC_EVERY_N_TICKS = 2
 
+# The Odds API bills per request and most plans (including the free tier)
+# have a modest monthly cap, unlike every other feed here (CoinGecko/
+# Yahoo/MLB Stats/Open-Meteo are all free and effectively uncapped) — so
+# this runs far less often on purpose. Each run costs up to 4 sports x 2
+# endpoints (odds + scores) = 8 requests; 240 ticks * 15s = ~1 hour between
+# runs works out to roughly 190 requests/day worst case. If your plan's
+# quota is tighter than that, raise this number — nothing else in the app
+# depends on odds markets refreshing quickly.
+ODDS_SYNC_EVERY_N_TICKS = 240
+
 
 def run_loop(interval_seconds=TICK_SECONDS, price_fetcher=price_feed.get_price, log=print, stop_event=None,
              sync_externals=sync_external_markets, external_sync_every=EXTERNAL_SYNC_EVERY_N_TICKS,
-             sync_sports=sports_tick, sports_sync_every=SPORTS_SYNC_EVERY_N_TICKS):
+             sync_sports=sports_tick, sports_sync_every=SPORTS_SYNC_EVERY_N_TICKS,
+             sync_odds=odds_tick, odds_sync_every=ODDS_SYNC_EVERY_N_TICKS):
     conn = _get_conn()
     tick_count = 0
     while stop_event is None or not stop_event.is_set():
@@ -441,6 +549,8 @@ def run_loop(interval_seconds=TICK_SECONDS, price_fetcher=price_feed.get_price, 
                 sync_externals(conn, log=log)
             if tick_count % sports_sync_every == 0:
                 sync_sports(conn, log=log)
+            if tick_count % odds_sync_every == 0:
+                sync_odds(conn, log=log)
         except Exception as e:  # noqa: BLE001 - keep the loop alive no matter what
             log(f"[scheduler] tick error: {e}")
         tick_count += 1

@@ -107,16 +107,25 @@ meant to be reachable by anyone else. To put UNICORN on a real URL:
      the default `admin`/`admin123` goes from a harmless localhost
      convenience to anyone-can-log-in-as-admin-and-resolve-markets on a
      real internet address.
+   - `ODDS_API_KEY` (optional) — a key from [the-odds-api.com](https://the-odds-api.com/)
+     turns on the NFL/NBA/MLB/NHL moneyline markets, seeded at real
+     sportsbook odds. Leave it unset and that feature just silently does
+     nothing, same as Kalshi/Polymarket imports being off by default —
+     nothing else in the app depends on it. This is the one feed here
+     backed by a metered/paid API, so keep an eye on your plan's request
+     quota; see the cadence comment on `ODDS_SYNC_EVERY_N_TICKS` in
+     `backend/app/scheduler.py` if you need to tune how often it polls.
 5. **Deploy, then generate a domain** (Settings → Networking → Generate
    Domain). Railway assigns a `*.up.railway.app` URL — that's your live
    site.
 
 **Why the Procfile pins `--workers 1`:** the background scheduler (the
-thing that opens/resolves the 48 timed markets and syncs Kalshi/Polymarket
-imports) runs as an in-process thread that starts when the app module
-loads. Multiple gunicorn worker processes would each start their own copy
-of that thread — duplicate calls to CoinGecko/Yahoo/Kalshi/Polymarket every
-tick, and threads racing to open the same market at once. One worker with
+thing that opens/resolves the 59 timed markets, the live MLB/moneyline
+sports markets, and syncs Kalshi/Polymarket imports) runs as an in-process
+thread that starts when the app module loads. Multiple gunicorn worker
+processes would each start their own copy of that thread — duplicate calls
+to CoinGecko/Yahoo/MLB Stats/The Odds API/Kalshi/Polymarket every tick, and
+threads racing to open the same market at once. One worker with
 several threads (`--threads 8`) handles concurrent HTTP requests fine at
 this scale without that problem. If you ever need more request throughput
 than one worker gives you, move the scheduler into its own process/service
