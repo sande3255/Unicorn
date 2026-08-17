@@ -165,6 +165,16 @@ USER_COLUMN_MIGRATIONS = [
     # a "bot" from then on, even if a human later also logs in and trades
     # the same account by hand.
     ("is_bot_trader", "INTEGER NOT NULL DEFAULT 0"),
+    # ISO timestamp of this account's most recent daily-bonus claim, or
+    # NULL if it's never claimed one. See claim_daily_bonus() in
+    # server.py — both the "already claimed today" check and the streak
+    # math key off comparing this to "now".
+    ("last_daily_claim_at", "TEXT"),
+    # Consecutive days (including today, once claimed) this account has
+    # claimed the daily bonus without missing a day. Reset to 1 (not 0)
+    # on any claim that follows a gap of more than ~48h since the last
+    # one — see claim_daily_bonus().
+    ("daily_streak", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 TRANSACTION_COLUMN_MIGRATIONS = [
@@ -218,6 +228,11 @@ def _migrate(conn):
     # Every comment list/insert filters or sorts by (market_id, created_at) —
     # see list_comments()/create_comment() in server.py.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_comments_market ON comments(market_id, created_at)")
+
+    # activity() (server.py) counts recent 'trade' rows by created_at on
+    # every poll (every few seconds, from every open tab) — worth an index
+    # once there's any real transaction volume.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_type_created ON transactions(type, created_at)")
 
     conn.commit()
 

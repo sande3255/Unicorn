@@ -188,14 +188,45 @@ function renderHeader() {
   }).join('');
 
   if (state.user) {
+    const streak = state.user.daily_streak || 0;
+    const claimable = !!state.user.daily_bonus_claimable;
     authAreaEl.innerHTML = `
       <span class="balance-pill">${COIN_SVG}${fmtMoney(state.user.balance)}</span>
+      ${streak > 0 ? `<span class="streak-pill" title="Consecutive days you've claimed the daily bonus">${streak}-day streak</span>` : ''}
+      ${claimable ? `<button id="daily-bonus-btn" class="primary" type="button">Claim daily bonus</button>` : ''}
       <span class="muted">${escapeHtml(state.user.username)}</span>
       <button id="logout-btn">Log out</button>
     `;
     document.getElementById('logout-btn').onclick = logout;
+    const bonusBtn = document.getElementById('daily-bonus-btn');
+    if (bonusBtn) bonusBtn.onclick = claimDailyBonus;
   } else {
     authAreaEl.innerHTML = `<a href="#/login" class="btn">Log in / Sign up</a>`;
+  }
+}
+
+// Claims the daily login bonus from the header button — deliberately not a
+// full page (it's a one-click, no-form action), so the button itself shows
+// the outcome inline rather than routing anywhere. See /api/daily-bonus in
+// server.py for the streak/amount math this is just displaying.
+async function claimDailyBonus() {
+  const btn = document.getElementById('daily-bonus-btn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = 'Claiming…';
+  try {
+    const result = await api('/api/daily-bonus', { method: 'POST' });
+    state.user.balance = result.balance;
+    state.user.daily_streak = result.streak;
+    state.user.daily_bonus_claimable = false;
+    btn.textContent = `+${fmtMoney(result.amount)} claimed!`;
+    // Leave the confirmation up briefly so it's actually readable, then
+    // re-render the header to its normal (now non-claimable) state.
+    setTimeout(renderHeader, 1600);
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Claim daily bonus';
+    btn.title = e.message;
   }
 }
 
@@ -1227,13 +1258,15 @@ function renderLogin() {
     walletBlock.style.display = mode === 'login' ? 'block' : 'none';
   };
 
-  function applyLoginResult(result) {
+  async function applyLoginResult(result) {
     state.token = result.token;
     localStorage.setItem('pm_token', result.token);
-    state.user = {
-      username: result.username, balance: result.balance,
-      is_admin: result.is_admin, wallet_address: result.wallet_address || null,
-    };
+    // The login/signup response itself doesn't carry daily_streak/
+    // daily_bonus_claimable (those only exist on /api/me) — refetch here
+    // instead of hand-assembling a partial state.user, so the header's
+    // claim button/streak pill are correct immediately rather than only
+    // after the next full page load.
+    await refreshMe();
     navigate('#/markets');
   }
 

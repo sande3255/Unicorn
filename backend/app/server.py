@@ -269,10 +269,103 @@ def login():
 @require_auth
 def me():
     u = g.user
+    claimable, _, streak = _daily_bonus_status(u)
     return jsonify({
         "username": u["username"], "balance": u["balance"], "is_admin": bool(u["is_admin"]),
         "wallet_address": u["wallet_address"] if "wallet_address" in u.keys() else None,
+        "daily_streak": streak, "daily_bonus_claimable": claimable,
     })
+
+
+# ---------- daily login bonus (play-money only, obviously) ----------
+#
+# A simple return-visit mechanic: claim once per COOLDOWN window for a
+# small balance top-up, with the amount scaling up the longer an unbroken
+# daily streak runs (capped so it doesn't run away forever). Streak state
+# lives directly on the users row (last_daily_claim_at, daily_streak) —
+# no separate table needed since there's only ever one "current" streak
+# per account, not a history of them.
+
+DAILY_BONUS_BASE = 25.0
+DAILY_BONUS_PER_STREAK_DAY = 5.0
+DAILY_BONUS_CAP = 100.0
+# Must wait at least this long since the last claim before claiming again.
+# Deliberately a bit under 24h (not exactly 24h) so a claim made a little
+# earlier each day — someone who logs in at 8am one day and 7am the next —
+# doesn't get blocked; a hard 24h:00m boundary would punish that.
+DAILY_BONUS_COOLDOWN_HOURS = 20
+# Claiming again within this many hours of the last claim keeps the streak
+# alive; longer than this (i.e. a full day was skipped) resets it to 1.
+DAILY_BONUS_STREAK_GRACE_HOURS = 48
+
+
+def _daily_bonus_amount(streak):
+    return min(DAILY_BONUS_CAP, DAILY_BONUS_BASE + DAILY_BONUS_PER_STREAK_DAY * max(streak - 1, 0))
+
+
+def _daily_bonus_status(user):
+    """Returns (claimable: bool, hours_until_claimable: float, current_streak: int).
+    `user` just needs to be any row/dict with last_daily_claim_at + daily_streak —
+    accepts both g.user (from an older cached session row) and a fresh SELECT."""
+    keys = user.keys()
+    last = user["last_daily_claim_at"] if "last_daily_claim_at" in keys else None
+    streak = user["daily_streak"] if "daily_streak" in keys else 0
+    if not last:
+        return True, 0.0, streak
+    elapsed_hours = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(last)).total_seconds() / 3600.0
+    if elapsed_hours >= DAILY_BONUS_COOLDOWN_HOURS:
+        return True, 0.0, streak
+    return False, DAILY_BONUS_COOLDOWN_HOURS - elapsed_hours, streak
+
+
+@app.get("/api/daily-bonus")
+@require_auth
+def daily_bonus_status():
+    claimable, hours_left, streak = _daily_bonus_status(g.user)
+    # What claiming right now would pay out (if claimable), or what the
+    # *next* claim would pay assuming the streak survives (if not) — either
+    # way it's "the amount attached to streak + 1", since a claim always
+    # advances the streak by at least 1.
+    return jsonify({
+        "claimable": claimable,
+        "hours_until_claimable": round(hours_left, 2),
+        "current_streak": streak,
+        "next_amount": _daily_bonus_amount(streak + 1),
+    })
+
+
+@app.post("/api/daily-bonus")
+@require_auth
+@rate_limit(10, 60)
+def claim_daily_bonus():
+    conn = db.get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    claimable, hours_left, streak = _daily_bonus_status(user)
+    if not claimable:
+        return jsonify({
+            "detail": f"Already claimed today's bonus — try again in about {hours_left:.1f}h.",
+        }), 400
+
+    last = user["last_daily_claim_at"] if "last_daily_claim_at" in user.keys() else None
+    if last:
+        gap_hours = (datetime.datetime.utcnow() - datetime.datetime.fromisoformat(last)).total_seconds() / 3600.0
+        new_streak = streak + 1 if gap_hours <= DAILY_BONUS_STREAK_GRACE_HOURS else 1
+    else:
+        new_streak = 1
+
+    amount = _daily_bonus_amount(new_streak)
+    new_balance = round(user["balance"] + amount, 2)
+    now = now_iso()
+    conn.execute(
+        "UPDATE users SET balance = ?, last_daily_claim_at = ?, daily_streak = ? WHERE id = ?",
+        (new_balance, now, new_streak, user["id"]),
+    )
+    conn.execute(
+        "INSERT INTO transactions (user_id, type, amount, balance_after) VALUES (?, 'daily_bonus', ?, ?)",
+        (user["id"], amount, new_balance),
+    )
+    conn.commit()
+    return jsonify({"balance": new_balance, "amount": amount, "streak": new_streak})
 
 
 # ---------- wallet-connect login (no real crypto ever moves — see wallet_auth.py) ----------
@@ -830,6 +923,23 @@ def delete_comment(comment_id):
     conn.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
     conn.commit()
     return jsonify({"deleted": True})
+
+
+@app.get("/api/activity")
+@rate_limit(60, 60)
+def activity():
+    """Trade count in the trailing 60 seconds, site-wide — the only
+    consumer today is the header's decorative sweep animation (see
+    updateSweepSpeed() in app.js), which speeds up the faster trading is
+    happening. Cheap enough to poll every few seconds: one indexed-ish
+    COUNT over a small recent window, no joins."""
+    conn = db.get_db()
+    cutoff = (datetime.datetime.utcnow() - datetime.timedelta(seconds=60)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) c FROM transactions WHERE type = 'trade' AND created_at >= ?",
+        (cutoff,),
+    ).fetchone()
+    return jsonify({"trades_last_60s": row["c"]})
 
 
 @app.get("/api/health")
