@@ -774,6 +774,75 @@ def portfolio():
     return jsonify(out)
 
 
+BALANCE_HISTORY_MAX_POINTS = 200
+
+
+@app.get("/api/portfolio/stats")
+@require_auth
+def portfolio_stats():
+    """Realized performance stats — win rate, total P&L, biggest single-market
+    win/loss — computed only from *resolved* markets, plus a balance-over-time
+    series for a sparkline chart. Deliberately separate from /api/portfolio
+    (which lists current open positions): this endpoint is about looking
+    backward at what already happened, that one's about what's still live."""
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT transactions.market_id, transactions.amount, "
+        "markets.question AS market_question, markets.status AS market_status "
+        "FROM transactions JOIN markets ON markets.id = transactions.market_id "
+        "WHERE transactions.user_id = ? AND transactions.type IN ('trade', 'payout')",
+        (g.user["id"],),
+    ).fetchall()
+
+    # One entry per market this user ever traded that has since resolved —
+    # net P&L is just every trade/payout amount for that market summed
+    # (trade rows are already stored negative, as the cost paid; payout
+    # rows are positive). A market still open contributes nothing here
+    # since its outcome — and therefore whether it was a "win" — isn't
+    # known yet.
+    per_market = {}
+    for r in rows:
+        if r["market_status"] != "resolved":
+            continue
+        entry = per_market.setdefault(r["market_id"], {"question": r["market_question"], "pnl": 0.0})
+        entry["pnl"] += r["amount"]
+
+    wins = [m for m in per_market.values() if m["pnl"] > 1e-9]
+    losses = [m for m in per_market.values() if m["pnl"] < -1e-9]
+    decided = wins + losses  # exact-breakeven markets (rare) count toward neither
+    win_rate = (len(wins) / len(decided)) if decided else None
+    total_realized_pnl = sum(m["pnl"] for m in per_market.values())
+    biggest_win = max(wins, key=lambda m: m["pnl"], default=None)
+    biggest_loss = min(losses, key=lambda m: m["pnl"], default=None)
+
+    balance_rows = conn.execute(
+        "SELECT balance_after, created_at FROM transactions WHERE user_id = ? ORDER BY created_at ASC",
+        (g.user["id"],),
+    ).fetchall()
+    # An active account can rack up thousands of transaction rows over
+    # time; the chart just needs enough points to look right, not every
+    # single one, so evenly downsample instead of shipping the whole log
+    # over the wire on every portfolio page load.
+    if len(balance_rows) > BALANCE_HISTORY_MAX_POINTS:
+        step = len(balance_rows) / BALANCE_HISTORY_MAX_POINTS
+        sampled = [balance_rows[int(i * step)] for i in range(BALANCE_HISTORY_MAX_POINTS)]
+        if sampled[-1] is not balance_rows[-1]:
+            sampled.append(balance_rows[-1])
+    else:
+        sampled = balance_rows
+
+    return jsonify({
+        "resolved_markets_traded": len(per_market),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": round(win_rate, 4) if win_rate is not None else None,
+        "total_realized_pnl": round(total_realized_pnl, 2),
+        "biggest_win": {"question": biggest_win["question"], "pnl": round(biggest_win["pnl"], 2)} if biggest_win else None,
+        "biggest_loss": {"question": biggest_loss["question"], "pnl": round(biggest_loss["pnl"], 2)} if biggest_loss else None,
+        "balance_history": [{"t": r["created_at"], "balance": r["balance_after"]} for r in sampled],
+    })
+
+
 @app.get("/api/leaderboard")
 def leaderboard():
     """Optional ?board=humans or ?board=bots narrows to accounts that have

@@ -141,6 +141,16 @@ Auth required (session or API key). Array of
 `{market_id, question, status, price_yes, shares_yes, shares_no,
 resolved_outcome}`, one entry per market you hold a nonzero position in.
 
+### `GET /api/portfolio/stats` — your realized performance
+
+Auth required (session or API key). `{resolved_markets_traded, wins,
+losses, win_rate, total_realized_pnl, biggest_win, biggest_loss,
+balance_history}`. Only counts markets that have actually resolved —
+open positions don't affect win/loss/P&L yet, since the outcome isn't
+known. `biggest_win`/`biggest_loss` are each either `null` or
+`{question, pnl}`. `balance_history` is `[{t, balance}, ...]`, downsampled
+to at most 200 points for accounts with a long transaction history.
+
 ### `GET /api/transactions` — your trade history
 
 Auth required (session or API key). Last 500 rows, newest first:

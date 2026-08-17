@@ -807,11 +807,146 @@ function renderPriceChart(container, history, currentPrice, opts = {}) {
 
 // ---------- portfolio ----------
 
+// Second hand-rolled SVG chart, separate from renderPriceChart() above:
+// that one assumes a fixed 0-100% probability axis (market YES price),
+// this one plots dollar balances with a dynamic min/max range — different
+// enough in scale handling that sharing one function would mean branching
+// on axis type throughout, rather than just having two small focused ones.
+function renderBalanceChart(container, points) {
+  if (!points || points.length === 0) {
+    container.innerHTML = `<p class="muted" style="font-size:13px;">Not enough history yet for a chart.</p>`;
+    return;
+  }
+  const w = container.clientWidth > 0 ? container.clientWidth : 560;
+  const h = 180;
+  // padL is wider than renderPriceChart's (36px, for short "100%" labels) --
+  // dollar-formatted labels like "$10,005.78" run noticeably longer and were
+  // clipping their leading "$" against the SVG's own edge (SVG's default
+  // overflow:hidden crops anything with a negative x) at the old 60px.
+  const padL = 74, padR = 12, padT = 16, padB = 26;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  const values = points.map(p => p.balance);
+  let minV = Math.min(...values), maxV = Math.max(...values);
+  if (minV === maxV) { minV -= 1; maxV += 1; } // flat history -- avoid a zero-height range
+  const rangePad = (maxV - minV) * 0.08;
+  minV -= rangePad; maxV += rangePad;
+
+  const xForIndex = (i) => padL + (points.length === 1 ? plotW / 2 : (i / (points.length - 1)) * plotW);
+  const yForValue = (v) => padT + (1 - (v - minV) / (maxV - minV)) * plotH;
+
+  const gridSteps = 4;
+  const gridLines = Array.from({ length: gridSteps + 1 }, (_, i) => {
+    const v = minV + (maxV - minV) * (i / gridSteps);
+    const y = yForValue(v);
+    return `<line x1="${padL}" y1="${y}" x2="${w - padR}" y2="${y}" stroke="var(--gridline)" stroke-width="1"/>
+            <text x="${padL - 8}" y="${y + 4}" font-size="10" fill="var(--text-muted)" text-anchor="end">${fmtMoney(v)}</text>`;
+  }).join('');
+
+  const lastX = points.length === 1 ? (w - padR) : xForIndex(points.length - 1);
+  const path = points.length === 1
+    ? `M ${padL} ${yForValue(points[0].balance).toFixed(1)} L ${lastX.toFixed(1)} ${yForValue(points[0].balance).toFixed(1)}`
+    : points.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${xForIndex(i).toFixed(1)} ${yForValue(pt.balance).toFixed(1)}`).join(' ');
+  const baselineY = padT + plotH;
+  const areaPath = `${path} L ${lastX.toFixed(1)} ${baselineY} L ${padL} ${baselineY} Z`;
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" role="img" aria-label="Balance history chart">
+      <defs>
+        <linearGradient id="balance-chart-area-fill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" style="stop-color:var(--series-1);stop-opacity:0.28"/>
+          <stop offset="100%" style="stop-color:var(--series-1);stop-opacity:0"/>
+        </linearGradient>
+      </defs>
+      ${gridLines}
+      <path d="${areaPath}" fill="url(#balance-chart-area-fill)" stroke="none"/>
+      <path d="${path}" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle id="balance-chart-hover-dot" cx="0" cy="0" r="4" fill="var(--series-1)" style="display:none;"/>
+      <line id="balance-chart-hover-line" x1="0" y1="${padT}" x2="0" y2="${padT + plotH}" stroke="var(--baseline)" stroke-width="1" style="display:none;"/>
+      <rect id="balance-chart-hover-target" x="${padL}" y="${padT}" width="${plotW}" height="${plotH}" fill="transparent" />
+    </svg>
+    <div id="balance-chart-tooltip" class="chart-tooltip" style="display:none;"></div>
+  `;
+
+  const svgEl = container.querySelector('svg');
+  const dot = document.getElementById('balance-chart-hover-dot');
+  const line = document.getElementById('balance-chart-hover-line');
+  const tooltip = document.getElementById('balance-chart-tooltip');
+  const target = document.getElementById('balance-chart-hover-target');
+
+  target.addEventListener('mousemove', (evt) => {
+    const rect = svgEl.getBoundingClientRect();
+    const scaleX = w / rect.width;
+    const mouseX = (evt.clientX - rect.left) * scaleX;
+    let nearest = 0, nearestDist = Infinity;
+    points.forEach((pt, i) => {
+      const dist = Math.abs(xForIndex(i) - mouseX);
+      if (dist < nearestDist) { nearestDist = dist; nearest = i; }
+    });
+    const pt = points[nearest];
+    const x = xForIndex(nearest), y = yForValue(pt.balance);
+    dot.setAttribute('cx', x); dot.setAttribute('cy', y); dot.style.display = 'block';
+    line.setAttribute('x1', x); line.setAttribute('x2', x); line.style.display = 'block';
+    const scale = rect.width / w;
+    tooltip.style.left = (x * scale) + 'px';
+    tooltip.style.top = (y * scale) + 'px';
+    tooltip.style.display = 'block';
+    tooltip.innerHTML = `<strong>${fmtMoney(pt.balance)}</strong><br><span style="color:var(--text-muted)">${fmtTime(pt.t)}</span>`;
+  });
+  target.addEventListener('mouseleave', () => {
+    dot.style.display = 'none'; line.style.display = 'none'; tooltip.style.display = 'none';
+  });
+}
+
+function pnlTile(label, entry, emptyLabel) {
+  if (!entry) {
+    return `<div class="stat-tile"><div class="stat-label">${label}</div><div class="stat-value">—</div><div class="stat-sub">${emptyLabel}</div></div>`;
+  }
+  const cls = entry.pnl >= 0 ? 'amt-pos' : 'amt-neg';
+  const sign = entry.pnl >= 0 ? '+' : '';
+  return `
+    <div class="stat-tile">
+      <div class="stat-label">${label}</div>
+      <div class="stat-value ${cls}">${sign}${fmtMoney(entry.pnl)}</div>
+      <div class="stat-sub" title="${escapeHtml(entry.question)}">${escapeHtml(entry.question)}</div>
+    </div>`;
+}
+
 async function renderPortfolio() {
   appEl.innerHTML = `<h1>Portfolio</h1><div id="portfolio-body">Loading…</div>`;
-  const positions = await api('/api/portfolio');
+  const [positions, stats] = await Promise.all([api('/api/portfolio'), api('/api/portfolio/stats')]);
   const body = document.getElementById('portfolio-body');
   body.innerHTML = `<p class="muted">Cash balance: <strong>${fmtMoney(state.user.balance)}</strong></p>`;
+
+  // Performance card — only worth showing once at least one market this
+  // account traded has actually resolved; otherwise every stat here would
+  // just be a wall of "—" placeholders, which isn't useful.
+  if (stats.resolved_markets_traded > 0) {
+    const pnlCls = stats.total_realized_pnl >= 0 ? 'amt-pos' : 'amt-neg';
+    const pnlSign = stats.total_realized_pnl >= 0 ? '+' : '';
+    body.innerHTML += `
+      <div class="card">
+        <h2>Performance</h2>
+        <div class="stats-grid">
+          <div class="stat-tile">
+            <div class="stat-label">Win rate</div>
+            <div class="stat-value">${stats.win_rate !== null ? fmtPct(stats.win_rate) : '—'}</div>
+            <div class="stat-sub">${stats.wins}W&nbsp;/&nbsp;${stats.losses}L</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-label">Realized P&amp;L</div>
+            <div class="stat-value ${pnlCls}">${pnlSign}${fmtMoney(stats.total_realized_pnl)}</div>
+            <div class="stat-sub">${stats.resolved_markets_traded} resolved market${stats.resolved_markets_traded === 1 ? '' : 's'}</div>
+          </div>
+          ${pnlTile('Biggest win', stats.biggest_win, 'No wins yet')}
+          ${pnlTile('Biggest loss', stats.biggest_loss, 'No losses yet')}
+        </div>
+        <div id="balance-chart-container" style="margin-top:16px;"></div>
+      </div>
+    `;
+    renderBalanceChart(document.getElementById('balance-chart-container'), stats.balance_history);
+  }
 
   if (positions.length === 0) {
     body.innerHTML += `<div class="empty-state">No open positions yet. <a href="#/markets">Browse markets</a>.</div>`;
@@ -908,7 +1043,7 @@ async function loadAndRenderLeaderboard() {
 // ---------- trade history ----------
 
 function typeLabel(t) {
-  const labels = { trade: 'Trade', signup_bonus: 'Signup bonus', payout: 'Payout', deposit: 'Deposit' };
+  const labels = { trade: 'Trade', signup_bonus: 'Signup bonus', payout: 'Payout', deposit: 'Deposit', daily_bonus: 'Daily bonus' };
   return labels[t] || t;
 }
 
