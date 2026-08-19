@@ -3,7 +3,9 @@
 const state = {
   token: localStorage.getItem('pm_token') || null,
   user: null, // { username, balance, is_admin }
+  notifications: { unread_count: 0, items: [] },
 };
+let notifDropdownOpen = false;
 
 // Mirrors DEPOSIT_FEE_PCT / DEPOSIT_FEE_FLAT in server.py — cosmetic label
 // only, the real numbers are enforced server-side.
@@ -178,6 +180,8 @@ function shortAddress(addr) {
 function logout() {
   state.token = null;
   state.user = null;
+  state.notifications = { unread_count: 0, items: [] };
+  notifDropdownOpen = false;
   localStorage.removeItem('pm_token');
   renderHeader();
   navigate('#/markets');
@@ -210,16 +214,150 @@ function renderHeader() {
       <span class="balance-pill">${COIN_SVG}${fmtMoney(state.user.balance)}</span>
       ${streak > 0 ? `<span class="streak-pill" title="Consecutive days you've claimed the daily bonus">${streak}-day streak</span>` : ''}
       ${claimable ? `<button id="daily-bonus-btn" class="primary" type="button">Claim daily bonus</button>` : ''}
+      <div class="notif-wrap">
+        <button id="notif-bell-btn" type="button" aria-label="Notifications" title="Notifications">
+          🔔<span id="notif-badge" class="notif-badge" style="display:none;">0</span>
+        </button>
+        <div id="notif-dropdown" class="notif-dropdown" style="display:none;"></div>
+      </div>
       <span class="muted">${escapeHtml(state.user.username)}</span>
       <button id="logout-btn">Log out</button>
     `;
     document.getElementById('logout-btn').onclick = logout;
     const bonusBtn = document.getElementById('daily-bonus-btn');
     if (bonusBtn) bonusBtn.onclick = claimDailyBonus;
+    document.getElementById('notif-bell-btn').onclick = (e) => {
+      e.stopPropagation();
+      toggleNotifDropdown();
+    };
+    updateNotifBadge();
+    if (notifDropdownOpen) {
+      renderNotifDropdown();
+      const dropdown = document.getElementById('notif-dropdown');
+      if (dropdown) dropdown.style.display = 'block';
+      positionNotifDropdown();
+    }
   } else {
     authAreaEl.innerHTML = `<a href="#/login" class="btn">Log in / Sign up</a>`;
   }
 }
+
+// ---------- notifications bell ----------
+//
+// Lives outside the router like the activity pulse above it — the bell and
+// its unread count are page chrome, not page content, so they persist and
+// keep polling across navigation instead of resetting on every route
+// change. The dropdown itself is fetched fresh (not just re-rendered from
+// cache) every time it's opened, so it never shows stale state from the
+// last poll tick.
+
+const NOTIF_POLL_MS = 20000;
+
+function updateNotifBadge() {
+  const badge = document.getElementById('notif-badge');
+  if (!badge) return;
+  const count = state.notifications.unread_count;
+  badge.textContent = count > 9 ? '9+' : String(count);
+  badge.style.display = count > 0 ? 'inline-flex' : 'none';
+}
+
+async function pollNotifications() {
+  if (!state.user) return;
+  try {
+    const data = await api('/api/notifications');
+    state.notifications = { unread_count: data.unread_count, items: data.notifications };
+    updateNotifBadge();
+    if (notifDropdownOpen) renderNotifDropdown();
+  } catch (e) {
+    // Decorative polling — a failed check just leaves the last known count up.
+  }
+}
+
+// Positions the (position:fixed) dropdown against the bell's actual
+// on-screen location, clamped so it never runs off the left edge on
+// narrow screens — plain top/right CSS can't do this since fixed
+// positioning is relative to the viewport, not the bell.
+function positionNotifDropdown() {
+  const bell = document.getElementById('notif-bell-btn');
+  const dropdown = document.getElementById('notif-dropdown');
+  if (!bell || !dropdown) return;
+  const rect = bell.getBoundingClientRect();
+  const width = Math.min(320, window.innerWidth - 24);
+  let left = rect.right - width;
+  left = Math.max(12, Math.min(left, window.innerWidth - width - 12));
+  dropdown.style.top = `${rect.bottom + 8}px`;
+  dropdown.style.left = `${left}px`;
+}
+
+function toggleNotifDropdown() {
+  notifDropdownOpen = !notifDropdownOpen;
+  const dropdown = document.getElementById('notif-dropdown');
+  if (!dropdown) return;
+  if (notifDropdownOpen) {
+    positionNotifDropdown();
+    dropdown.style.display = 'block';
+    pollNotifications(); // fetch fresh the moment it's opened, not last poll's cache
+  } else {
+    dropdown.style.display = 'none';
+  }
+}
+
+function renderNotifDropdown() {
+  const dropdown = document.getElementById('notif-dropdown');
+  if (!dropdown) return;
+  const items = state.notifications.items;
+  const header = `
+    <div class="notif-dropdown-header">
+      <strong>Notifications</strong>
+      ${state.notifications.unread_count > 0 ? `<button type="button" id="notif-mark-all-btn" class="link-btn">mark all read</button>` : ''}
+    </div>`;
+  const body = items.length === 0
+    ? `<p class="muted" style="margin:8px 0;">No notifications yet.</p>`
+    : items.map(n => `
+      <div class="notif-item${n.is_read ? '' : ' notif-item-unread'}" data-id="${n.id}"${n.market_id ? ` data-market-id="${n.market_id}"` : ''}>
+        <div class="notif-item-message">${escapeHtml(n.message)}</div>
+        <div class="muted notif-item-time">${fmtTime(n.created_at)}</div>
+      </div>`).join('');
+  dropdown.innerHTML = header + `<div class="notif-dropdown-body">${body}</div>`;
+
+  const markAllBtn = document.getElementById('notif-mark-all-btn');
+  if (markAllBtn) markAllBtn.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      await api('/api/notifications/read_all', { method: 'POST' });
+      await pollNotifications();
+    } catch (err) { /* leave as-is on failure */ }
+  };
+  dropdown.querySelectorAll('.notif-item').forEach(el => {
+    el.onclick = async () => {
+      const id = el.dataset.id;
+      const marketId = el.dataset.marketId;
+      if (el.classList.contains('notif-item-unread')) {
+        try { await api(`/api/notifications/${id}/read`, { method: 'POST' }); } catch (err) { /* ignore */ }
+        await pollNotifications();
+      }
+      if (marketId) {
+        notifDropdownOpen = false;
+        navigate(`#/market/${marketId}`);
+      }
+    };
+  });
+}
+
+// Clicking anywhere outside the dropdown closes it — a bare document
+// listener rather than per-element blur handling, since the dropdown's
+// contents (delete/mark-read buttons) already stopPropagation() on the
+// clicks that shouldn't bubble up and close it.
+document.addEventListener('click', (e) => {
+  if (!notifDropdownOpen) return;
+  const wrap = document.querySelector('.notif-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    notifDropdownOpen = false;
+    const dropdown = document.getElementById('notif-dropdown');
+    if (dropdown) dropdown.style.display = 'none';
+  }
+});
+window.addEventListener('resize', () => { if (notifDropdownOpen) positionNotifDropdown(); });
 
 // Claims the daily login bonus from the header button — deliberately not a
 // full page (it's a one-click, no-form action), so the button itself shows
@@ -1525,6 +1663,7 @@ function renderLogin() {
     // claim button/streak pill are correct immediately rather than only
     // after the next full page load.
     await refreshMe();
+    pollNotifications();
     navigate('#/markets');
   }
 
@@ -1744,7 +1883,9 @@ async function pollActivity() {
   initInstallBanner();
   pollActivity();
   setInterval(pollActivity, ACTIVITY_POLL_MS);
+  setInterval(pollNotifications, NOTIF_POLL_MS);
   await refreshMe();
   renderHeader();
+  pollNotifications();
   navigate();
 })();

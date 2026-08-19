@@ -250,6 +250,69 @@ def serialize_market(m, with_description=False, with_history=False, conn=None):
     return out
 
 
+# ---------- notifications ----------
+#
+# A flat, pre-rendered feed (see the `notifications` table comment in
+# db.py) fed by every other event that's worth telling a user about after
+# the fact: a market they held a position in resolving, a new achievement,
+# a completed weekly challenge, a referral signing up. _notify() is the
+# single insertion point every one of those call sites uses, so the shape
+# of a notification row never has to be duplicated.
+
+def _notify(conn, user_id, ntype, message, market_id=None):
+    conn.execute(
+        "INSERT INTO notifications (user_id, type, message, market_id) VALUES (?, ?, ?, ?)",
+        (user_id, ntype, message, market_id),
+    )
+
+
+@app.get("/api/notifications")
+@require_auth
+def notifications():
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT id, type, message, market_id, is_read, created_at FROM notifications "
+        "WHERE user_id = ? ORDER BY created_at DESC LIMIT 50",
+        (g.user["id"],),
+    ).fetchall()
+    unread_count = conn.execute(
+        "SELECT COUNT(*) c FROM notifications WHERE user_id = ? AND is_read = 0", (g.user["id"],)
+    ).fetchone()["c"]
+    return jsonify({
+        "unread_count": unread_count,
+        "notifications": [
+            {
+                "id": r["id"], "type": r["type"], "message": r["message"],
+                "market_id": r["market_id"], "is_read": bool(r["is_read"]), "created_at": r["created_at"],
+            }
+            for r in rows
+        ],
+    })
+
+
+@app.post("/api/notifications/<int:notification_id>/read")
+@require_auth
+def mark_notification_read(notification_id):
+    conn = db.get_db()
+    row = conn.execute(
+        "SELECT id FROM notifications WHERE id = ? AND user_id = ?", (notification_id, g.user["id"])
+    ).fetchone()
+    if not row:
+        return jsonify({"detail": "Notification not found"}), 404
+    conn.execute("UPDATE notifications SET is_read = 1 WHERE id = ?", (notification_id,))
+    conn.commit()
+    return jsonify({"marked_read": True})
+
+
+@app.post("/api/notifications/read_all")
+@require_auth
+def mark_all_notifications_read():
+    conn = db.get_db()
+    conn.execute("UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0", (g.user["id"],))
+    conn.commit()
+    return jsonify({"marked_read": True})
+
+
 # ---------- auth routes ----------
 
 # Flat play-money bonus credited to BOTH sides of a referral the moment the
@@ -310,6 +373,10 @@ def signup():
         conn.execute(
             "INSERT INTO transactions (user_id, type, amount, balance_after) VALUES (?, 'referral_bonus', ?, ?)",
             (referrer["id"], REFERRAL_BONUS_REFERRER, new_referrer_balance),
+        )
+        _notify(
+            conn, referrer["id"], "referral_signup",
+            f"{username} signed up using your referral link — you earned ${REFERRAL_BONUS_REFERRER:,.2f}.",
         )
     token = new_token()
     conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
@@ -1071,10 +1138,15 @@ def sync_achievements(conn, user):
     new_keys = qualifying - existing
     if new_keys:
         now = now_iso()
+        by_key = {a["key"]: a for a in ACHIEVEMENTS}
         for key in new_keys:
             conn.execute(
                 "INSERT OR IGNORE INTO user_achievements (user_id, achievement_key, earned_at) VALUES (?, ?, ?)",
                 (user["id"], key, now),
+            )
+            _notify(
+                conn, user["id"], "achievement_earned",
+                f"Achievement unlocked: {by_key[key]['label']} — {by_key[key]['description']}",
             )
         conn.commit()
     return existing | new_keys
@@ -1226,6 +1298,10 @@ def sync_challenges(conn, user):
                 "INSERT INTO transactions (user_id, type, amount, balance_after) "
                 "VALUES (?, 'weekly_challenge', ?, ?)",
                 (user_id, reward, balance),
+            )
+            _notify(
+                conn, user_id, "challenge_completed",
+                f"Weekly challenge completed: {by_key[key]['label']} — you earned ${reward:,.2f}.",
             )
             existing[key] = now
         conn.execute("UPDATE users SET balance = ? WHERE id = ?", (balance, user_id))

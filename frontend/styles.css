@@ -549,6 +549,89 @@ form.auth-form { max-width: 360px; margin: 40px auto; }
   .chart-live-pulse { animation: none; opacity: 0.2; }
 }
 
+/* ---------- notifications bell ---------- */
+.notif-wrap { position: relative; display: inline-flex; }
+#notif-bell-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  color: var(--text-secondary);
+}
+#notif-bell-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.notif-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--critical);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  align-items: center;
+  justify-content: center;
+}
+.notif-dropdown {
+  /* position:fixed (not absolute) and placed via JS in toggleNotifDropdown()
+     — #auth-area needs overflow-x:auto at mobile widths so the pill row can
+     scroll (see its mobile rule below), and an absolutely-positioned child
+     of an overflow:auto ancestor gets silently clipped to that ancestor's
+     box. Fixed positioning escapes that ancestor entirely, same fix as the
+     header/chip-row overflow bugs elsewhere in this file. */
+  position: fixed;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: 420px;
+  overflow-y: auto;
+  background: var(--card-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  z-index: 40;
+  font-size: 13px;
+}
+.notif-dropdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--gridline);
+  color: var(--text-primary);
+}
+.notif-dropdown-body { padding: 4px 12px; }
+.notif-item {
+  padding: 9px 0;
+  border-bottom: 1px solid var(--gridline);
+  cursor: pointer;
+}
+.notif-item:last-child { border-bottom: none; }
+.notif-item:hover { background: rgba(255, 198, 26, 0.04); }
+.notif-item-unread { position: relative; padding-left: 12px; }
+.notif-item-unread::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 13px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--gold);
+}
+.notif-item-message { color: var(--text-primary); line-height: 1.4; }
+.notif-item-time { font-size: 11px; margin-top: 2px; }
+
 /* ---------- comments (per-market discussion) ---------- */
 #comments-form-area textarea { resize: vertical; min-height: 44px; }
 .comment-item { padding: 10px 0; border-bottom: 1px solid var(--gridline); }

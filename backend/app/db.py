@@ -129,6 +129,24 @@ CREATE TABLE IF NOT EXISTS comments (
     FOREIGN KEY (market_id) REFERENCES markets(id),
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+-- One row per in-app notification (market resolved, achievement earned,
+-- weekly challenge completed, referral bonus earned). Deliberately a flat
+-- feed rather than typed sub-tables — `type` + a pre-rendered `message`
+-- string is enough for a simple bell-icon dropdown, and it means every
+-- new notification-worthy event just needs one INSERT, not a schema
+-- change. See _notify() in server.py.
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    market_id INTEGER,
+    is_read INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (market_id) REFERENCES markets(id)
+);
 """
 
 
@@ -270,6 +288,19 @@ def _migrate(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_challenge_claims_user_week "
         "ON user_challenge_claims(user_id, week_key)"
+    )
+
+    # GET /api/notifications orders a user's feed by created_at; the
+    # partial unread index keeps "how many unread" (polled from the header
+    # bell on every page) cheap even once a user has thousands of read
+    # notifications piled up behind it.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_user_created "
+        "ON notifications(user_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notifications_user_unread "
+        "ON notifications(user_id, is_read) WHERE is_read = 0"
     )
 
     conn.commit()

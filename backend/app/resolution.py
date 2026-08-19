@@ -27,6 +27,9 @@ def apply_resolution(conn, market_id: int, outcome: str, settlement_price: float
 
     positions = conn.execute("SELECT * FROM positions WHERE market_id = ?", (market_id,)).fetchall()
     for pos in positions:
+        had_stake = abs(pos["shares_yes"]) > 1e-9 or abs(pos["shares_no"]) > 1e-9
+        if not had_stake:
+            continue
         winning_shares = pos["shares_yes"] if outcome == "YES" else pos["shares_no"]
         if winning_shares > 1e-9:
             user = conn.execute("SELECT * FROM users WHERE id = ?", (pos["user_id"],)).fetchone()
@@ -37,5 +40,14 @@ def apply_resolution(conn, market_id: int, outcome: str, settlement_price: float
                 "VALUES (?, ?, 'payout', ?, ?, ?, ?)",
                 (user["id"], market_id, outcome, winning_shares, winning_shares, new_balance),
             )
+            message = f"“{m['question']}” resolved {outcome} — you won ${winning_shares:,.2f}."
+        else:
+            message = f"“{m['question']}” resolved {outcome} — your position didn't pay out."
+        # Notify every trader who held a stake, win or lose — not just
+        # winners — so a loss isn't silently invisible compared to a win.
+        conn.execute(
+            "INSERT INTO notifications (user_id, type, message, market_id) VALUES (?, 'market_resolved', ?, ?)",
+            (pos["user_id"], message, market_id),
+        )
     conn.commit()
     return conn.execute("SELECT * FROM markets WHERE id = ?", (market_id,)).fetchone()
