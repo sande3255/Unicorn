@@ -1,0 +1,7 @@
+node_modules/
+
+# ios/ and android/ are intentionally NOT ignored — Capacitor's convention
+# is to commit the native projects (they can carry custom native code,
+# signing config, etc.), only their own build output gets ignored, which
+# each platform's own nested .gitignore (added by `cap add`) already
+# handles once those folders exist.

@@ -151,6 +151,43 @@ known. `biggest_win`/`biggest_loss` are each either `null` or
 `{question, pnl}`. `balance_history` is `[{t, balance}, ...]`, downsampled
 to at most 200 points for accounts with a long transaction history.
 
+### `GET /api/achievements` — your badges
+
+Auth required (session or API key). Array of
+`{key, label, description, earned, earned_at}`, one entry per badge in
+the fixed catalog (first trade, century club, first win, hot streak,
+high roller, big winner, market explorer, daily devotee, bot trader).
+`earned_at` is `null` until the badge is earned, then stays fixed —
+badges are permanent once earned even if the underlying condition
+later stops being true (e.g. `daily_devotee` stays earned after a
+streak later resets).
+
+### `GET /api/challenges` — this week's challenges
+
+Auth required (session or API key). `{balance, resets_at, challenges}`,
+where `challenges` is `[{key, label, description, reward, completed,
+completed_at}, ...]` for a fixed catalog of 3 (place 5 trades, trade in
+3 categories, place a single $100+ trade). Unlike achievements these
+reset every UTC week (Monday 00:00) — `completed`/`completed_at` only
+ever describe the *current* week, and the reward is paid out
+automatically the moment a call to this endpoint notices you newly
+qualify (same auto-claim pattern as achievements, just scoped to the
+week). `balance` reflects any reward this call just credited, so it's
+worth reading even if you only care about your balance.
+
+### `GET /api/referrals` — your referral stats
+
+Auth required (session or API key). `{referral_code, referral_count,
+total_bonus_earned, referred_users}`. `referral_code` is just your own
+username — a referral link is `<site>/#/login?ref=<referral_code>`.
+`referred_users` is `[{username, created_at}, ...]` for everyone who
+signed up through it, newest first. `POST /api/signup` accepts an
+optional `referral_code` field; a code that doesn't match a real
+account (or matches your own new username) is silently ignored rather
+than rejected. When it does match, both accounts are credited a flat
+$250 play-money bonus the moment the new account is created — see
+`REFERRAL_BONUS_REFEREE`/`REFERRAL_BONUS_REFERRER` in `server.py`.
+
 ### `GET /api/transactions` — your trade history
 
 Auth required (session or API key). Last 500 rows, newest first:

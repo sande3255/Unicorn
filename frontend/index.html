@@ -10,6 +10,18 @@
        black) rather than shipping a separate image asset — one SVG, no
        extra file, and it stays in sync if the brand mark ever changes. -->
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23070705'/%3E%3Ccircle cx='12' cy='12' r='8' stroke='%23ffc61a' stroke-width='1.8' fill='none'/%3E%3Ccircle cx='12' cy='12' r='2.4' fill='%23ffc61a'/%3E%3Cg stroke='%23ffc61a' stroke-width='1.8' stroke-linecap='round'%3E%3Cline x1='12' y1='1.5' x2='12' y2='5.5'/%3E%3Cline x1='12' y1='18.5' x2='12' y2='22.5'/%3E%3Cline x1='1.5' y1='12' x2='5.5' y2='12'/%3E%3Cline x1='18.5' y1='12' x2='22.5' y2='12'/%3E%3C/g%3E%3C/svg%3E" />
+  <!-- Web app manifest + apple-touch-icon: lets someone add UNICORN to
+       their phone's home screen (Safari/Chrome's "Add to Home Screen")
+       with a real icon and a standalone, no-browser-chrome launch — an
+       app-like install with zero App Store review, zero Apple Developer
+       fee, live immediately. Doesn't replace a real native App Store
+       listing (see mobile/ for that path) but gets most of the "icon on
+       my phone" experience today. -->
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="UNICORN" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -30,6 +42,24 @@
       </span>
       <a class="support-banner-btn" href="https://www.paypal.com/donate?business=msandersoddd%40gmail.com&no_recurring=0&item_name=UNICORN+Licensing+%26+Legal+Fund&currency_code=USD" target="_blank" rel="noopener noreferrer">Support the Licensing Fund</a>
       <button class="support-banner-close" id="support-banner-close" type="button" aria-label="Dismiss support banner">&times;</button>
+    </div>
+  </div>
+  <!-- Install-to-home-screen banner: a free alternative to a native App
+       Store listing (which needs a $99/year Apple Developer account this
+       project doesn't have budget for yet). Hidden by default; JS decides
+       at runtime whether to show the Android/Chrome "Install" button
+       (real one-tap install, via the beforeinstallprompt event) or the
+       iOS instructions (Safari doesn't expose a programmatic install
+       prompt — Share > Add to Home Screen is the only path there). Never
+       shown at all if the site is already running installed, or on a
+       desktop browser that hasn't offered to install it. See
+       initInstallBanner() in app.js. -->
+  <div id="install-banner" style="display:none;">
+    <div class="support-banner-inner">
+      <span class="support-banner-icon" aria-hidden="true">⇩</span>
+      <span class="support-banner-text" id="install-banner-text"></span>
+      <button class="support-banner-btn install-banner-btn" id="install-banner-action" type="button" style="display:none;">Install app</button>
+      <button class="support-banner-close" id="install-banner-close" type="button" aria-label="Dismiss install banner">&times;</button>
     </div>
   </div>
   <header id="site-header">

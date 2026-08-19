@@ -1,0 +1,12 @@
+{
+  "appId": "com.sanders.unicorn",
+  "appName": "UNICORN",
+  "webDir": "www",
+  "backgroundColor": "#070705",
+  "ios": {
+    "backgroundColor": "#070705"
+  },
+  "android": {
+    "backgroundColor": "#070705"
+  }
+}

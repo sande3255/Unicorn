@@ -101,6 +101,25 @@ CREATE TABLE IF NOT EXISTS api_keys (
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS user_achievements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    achievement_key TEXT NOT NULL,
+    earned_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, achievement_key),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_challenge_claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    challenge_key TEXT NOT NULL,
+    week_key TEXT NOT NULL,
+    claimed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, challenge_key, week_key),
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id INTEGER NOT NULL,
@@ -175,6 +194,12 @@ USER_COLUMN_MIGRATIONS = [
     # on any claim that follows a gap of more than ~48h since the last
     # one — see claim_daily_bonus().
     ("daily_streak", "INTEGER NOT NULL DEFAULT 0"),
+    # user_id of the account whose referral link this account signed up
+    # through, or NULL if they signed up unreferred / the referral code
+    # they entered didn't match a real account. Set once at signup and
+    # never changed afterward. See signup() and GET /api/referrals in
+    # server.py.
+    ("referred_by_user_id", "INTEGER"),
 ]
 
 TRANSACTION_COLUMN_MIGRATIONS = [
@@ -219,6 +244,12 @@ def _migrate(conn):
         "CREATE UNIQUE INDEX idx_users_wallet_address ON users(wallet_address) "
         "WHERE wallet_address IS NOT NULL"
     )
+    # GET /api/referrals looks up "who did this account refer" by this
+    # column on every call.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by_user_id) "
+        "WHERE referred_by_user_id IS NOT NULL"
+    )
 
     existing_txn_cols = {row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()}
     for name, coltype in TRANSACTION_COLUMN_MIGRATIONS:
@@ -233,6 +264,13 @@ def _migrate(conn):
     # every poll (every few seconds, from every open tab) — worth an index
     # once there's any real transaction volume.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_transactions_type_created ON transactions(type, created_at)")
+
+    # sync_challenges() (server.py) checks "has this user already claimed
+    # this challenge this week" on every /api/challenges call.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_challenge_claims_user_week "
+        "ON user_challenge_claims(user_id, week_key)"
+    )
 
     conn.commit()
 

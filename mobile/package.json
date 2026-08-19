@@ -1,0 +1,21 @@
+{
+  "name": "unicorn-mobile",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Native iOS/Android wrapper for UNICORN, built with Capacitor. Wraps the same frontend/ code already deployed on Railway — see mobile/README.md.",
+  "scripts": {
+    "sync": "cap sync",
+    "open:ios": "cap open ios",
+    "open:android": "cap open android",
+    "assets": "capacitor-assets generate"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/ios": "^6.0.0",
+    "@capacitor/android": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0",
+    "@capacitor/assets": "^3.0.0"
+  }
+}

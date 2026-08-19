@@ -32,6 +32,49 @@ FRONTEND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.p
 app = Flask(__name__, static_folder=None)
 db.init_db(app)
 
+# ---------- CORS for /api/* ----------
+#
+# The web frontend never needed this — it's always served from the same
+# Railway origin as the API, so its fetch() calls are same-origin and
+# browsers don't apply CORS at all. Two things do need it: the native
+# mobile wrapper (mobile/www/index.html sets UNICORN_API_BASE to the full
+# Railway URL and calls it from inside the app's own WebView origin —
+# capacitor://localhost on iOS, https://localhost on Android — which IS
+# cross-origin from the API's point of view), and any third-party bot
+# dashboard or browser-based tool someone builds against the public API
+# documented in API.md.
+#
+# Wide open (Access-Control-Allow-Origin: *) is a deliberate, reasoned
+# choice, not an oversight: every /api/ route authenticates via an
+# `Authorization: Bearer <token>` header, never cookies, so there's no
+# ambient-credential/CSRF angle here the way there would be for a
+# cookie-session API — a page on another origin can't make an
+# authenticated request against this API unless its own JS already has
+# the caller's token in hand, which CORS does nothing to prevent or allow
+# either way. No third-party dependency (e.g. flask-cors) needed for
+# something this small.
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+}
+
+
+@app.before_request
+def handle_api_cors_preflight():
+    if request.method == "OPTIONS" and request.path.startswith("/api/"):
+        response = app.make_default_options_response()
+        response.headers.update(CORS_HEADERS)
+        return response
+
+
+@app.after_request
+def add_api_cors_headers(response):
+    if request.path.startswith("/api/"):
+        response.headers.update(CORS_HEADERS)
+    return response
+
 
 def seed_admin():
     import sqlite3
@@ -209,11 +252,21 @@ def serialize_market(m, with_description=False, with_history=False, conn=None):
 
 # ---------- auth routes ----------
 
+# Flat play-money bonus credited to BOTH sides of a referral the moment the
+# referred account signs up — no cap, no streak math (unlike the daily
+# bonus), since a referral can only ever fire once per new account. Kept
+# equal for both sides so "invite a friend" reads as a mutual benefit
+# rather than the referrer skimming off the new signup.
+REFERRAL_BONUS_REFEREE = 250.0
+REFERRAL_BONUS_REFERRER = 250.0
+
+
 @app.post("/api/signup")
 def signup():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
+    referral_code = (data.get("referral_code") or "").strip()
     if len(username) < 3 or len(username) > 32:
         return jsonify({"detail": "Username must be 3-32 characters"}), 400
     if len(password) < 6:
@@ -224,23 +277,49 @@ def signup():
     if existing:
         return jsonify({"detail": "Username already taken"}), 400
 
+    # A referral code is just the referrer's username. Silently ignore it
+    # if it doesn't match a real account or matches the new username
+    # itself (can't refer yourself) — a bad/stale referral link should
+    # never block signup, it should just not pay out.
+    referrer = None
+    if referral_code and referral_code.lower() != username.lower():
+        referrer = conn.execute(
+            "SELECT id, username, balance FROM users WHERE username = ?", (referral_code,)
+        ).fetchone()
+
+    starting_balance = db.STARTING_BALANCE + (REFERRAL_BONUS_REFEREE if referrer else 0)
+
     pw_hash = hash_password(password)
     cur = conn.execute(
-        "INSERT INTO users (username, password_hash, balance, is_admin) VALUES (?, ?, ?, 0)",
-        (username, pw_hash, db.STARTING_BALANCE),
+        "INSERT INTO users (username, password_hash, balance, is_admin, referred_by_user_id) "
+        "VALUES (?, ?, ?, 0, ?)",
+        (username, pw_hash, starting_balance, referrer["id"] if referrer else None),
     )
     user_id = cur.lastrowid
     conn.execute(
         "INSERT INTO transactions (user_id, type, amount, balance_after) VALUES (?, 'signup_bonus', ?, ?)",
         (user_id, db.STARTING_BALANCE, db.STARTING_BALANCE),
     )
+    if referrer:
+        conn.execute(
+            "INSERT INTO transactions (user_id, type, amount, balance_after) VALUES (?, 'referral_bonus', ?, ?)",
+            (user_id, REFERRAL_BONUS_REFEREE, starting_balance),
+        )
+        new_referrer_balance = referrer["balance"] + REFERRAL_BONUS_REFERRER
+        conn.execute("UPDATE users SET balance = ? WHERE id = ?", (new_referrer_balance, referrer["id"]))
+        conn.execute(
+            "INSERT INTO transactions (user_id, type, amount, balance_after) VALUES (?, 'referral_bonus', ?, ?)",
+            (referrer["id"], REFERRAL_BONUS_REFERRER, new_referrer_balance),
+        )
     token = new_token()
     conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
     conn.commit()
 
     return jsonify({
-        "token": token, "username": username, "balance": db.STARTING_BALANCE,
+        "token": token, "username": username, "balance": starting_balance,
         "is_admin": False, "wallet_address": None,
+        "referral_bonus_applied": bool(referrer),
+        "referred_by_username": referrer["username"] if referrer else None,
     })
 
 
@@ -777,6 +856,37 @@ def portfolio():
 BALANCE_HISTORY_MAX_POINTS = 200
 
 
+def _resolved_market_pnls(conn, user_id):
+    """One entry per market this user ever traded that has since resolved:
+    {market_id, question, pnl, resolved_at}, sorted oldest-resolved-first.
+    net P&L per market is just every trade/payout amount for that market
+    summed (trade rows are already stored negative, as the cost paid;
+    payout rows are positive, credited only to winning positions — see
+    apply_resolution() in resolution.py). A market still open contributes
+    nothing here since its outcome isn't known yet. Shared by
+    /api/portfolio/stats (win rate, P&L, biggest win/loss) and
+    /api/achievements (first-win / hot-streak checks) so both agree on
+    what counts as a "win" for a given market."""
+    rows = conn.execute(
+        "SELECT transactions.market_id, transactions.amount, "
+        "markets.question AS market_question, markets.status AS market_status, "
+        "markets.resolved_at AS market_resolved_at "
+        "FROM transactions JOIN markets ON markets.id = transactions.market_id "
+        "WHERE transactions.user_id = ? AND transactions.type IN ('trade', 'payout')",
+        (user_id,),
+    ).fetchall()
+    per_market = {}
+    for r in rows:
+        if r["market_status"] != "resolved":
+            continue
+        entry = per_market.setdefault(r["market_id"], {
+            "market_id": r["market_id"], "question": r["market_question"],
+            "pnl": 0.0, "resolved_at": r["market_resolved_at"],
+        })
+        entry["pnl"] += r["amount"]
+    return sorted(per_market.values(), key=lambda m: m["resolved_at"] or "")
+
+
 @app.get("/api/portfolio/stats")
 @require_auth
 def portfolio_stats():
@@ -786,26 +896,8 @@ def portfolio_stats():
     (which lists current open positions): this endpoint is about looking
     backward at what already happened, that one's about what's still live."""
     conn = db.get_db()
-    rows = conn.execute(
-        "SELECT transactions.market_id, transactions.amount, "
-        "markets.question AS market_question, markets.status AS market_status "
-        "FROM transactions JOIN markets ON markets.id = transactions.market_id "
-        "WHERE transactions.user_id = ? AND transactions.type IN ('trade', 'payout')",
-        (g.user["id"],),
-    ).fetchall()
-
-    # One entry per market this user ever traded that has since resolved —
-    # net P&L is just every trade/payout amount for that market summed
-    # (trade rows are already stored negative, as the cost paid; payout
-    # rows are positive). A market still open contributes nothing here
-    # since its outcome — and therefore whether it was a "win" — isn't
-    # known yet.
-    per_market = {}
-    for r in rows:
-        if r["market_status"] != "resolved":
-            continue
-        entry = per_market.setdefault(r["market_id"], {"question": r["market_question"], "pnl": 0.0})
-        entry["pnl"] += r["amount"]
+    market_pnls = _resolved_market_pnls(conn, g.user["id"])
+    per_market = {m["market_id"]: m for m in market_pnls}
 
     wins = [m for m in per_market.values() if m["pnl"] > 1e-9]
     losses = [m for m in per_market.values() if m["pnl"] < -1e-9]
@@ -840,6 +932,328 @@ def portfolio_stats():
         "biggest_win": {"question": biggest_win["question"], "pnl": round(biggest_win["pnl"], 2)} if biggest_win else None,
         "biggest_loss": {"question": biggest_loss["question"], "pnl": round(biggest_loss["pnl"], 2)} if biggest_loss else None,
         "balance_history": [{"t": r["created_at"], "balance": r["balance_after"]} for r in sampled],
+    })
+
+
+# ---------- achievements ----------
+#
+# A fixed catalog (not a DB table) of badges, each with a `check` predicate
+# run against fresh-computed stats. Earning is one-way and persisted in
+# user_achievements the first time a check passes (see sync_achievements)
+# — deliberately NOT re-derived from scratch on every request, so a badge
+# that depends on a value that can go back down (daily_streak resets after
+# a missed day; is_bot_trader is the only monotonic one already) doesn't
+# flicker on and off. Once earned, always earned.
+
+ACHIEVEMENTS = [
+    {
+        "key": "first_trade", "label": "First Trade",
+        "description": "Place your first trade.",
+    },
+    {
+        "key": "century_club", "label": "Century Club",
+        "description": "Place 100 trades.",
+    },
+    {
+        "key": "first_win", "label": "First Win",
+        "description": "Win your first resolved market.",
+    },
+    {
+        "key": "hot_streak", "label": "Hot Streak",
+        "description": "Win 3 resolved markets in a row.",
+    },
+    {
+        "key": "high_roller", "label": "High Roller",
+        "description": "Spend $250 or more on a single trade.",
+    },
+    {
+        "key": "big_winner", "label": "Big Winner",
+        "description": "Net $100 or more in profit on a single market.",
+    },
+    {
+        "key": "market_explorer", "label": "Market Explorer",
+        "description": "Trade in 5 different market categories.",
+    },
+    {
+        "key": "daily_devotee", "label": "Daily Devotee",
+        "description": "Reach a 7-day daily-bonus streak.",
+    },
+    {
+        "key": "bot_trader", "label": "Bot Trader",
+        "description": "Place a trade using an API key.",
+    },
+    {
+        "key": "networker", "label": "Networker",
+        "description": "Refer 3 friends who sign up.",
+    },
+]
+
+
+def _currently_qualifying_achievements(conn, user):
+    """Returns the set of achievement keys `user` qualifies for *right now*
+    — a superset of what's persisted, since this re-checks everything on
+    every call. sync_achievements() below is what actually reconciles this
+    against user_achievements and makes earning permanent."""
+    user_id = user["id"]
+    earned = set()
+
+    trade_count = conn.execute(
+        "SELECT COUNT(*) c FROM transactions WHERE user_id = ? AND type = 'trade'", (user_id,)
+    ).fetchone()["c"]
+    if trade_count >= 1:
+        earned.add("first_trade")
+    if trade_count >= 100:
+        earned.add("century_club")
+
+    market_pnls = _resolved_market_pnls(conn, user_id)
+    if any(m["pnl"] > 1e-9 for m in market_pnls):
+        earned.add("first_win")
+    if any(m["pnl"] >= 100 - 1e-9 for m in market_pnls):
+        earned.add("big_winner")
+
+    # Longest run of consecutive wins, in resolution order — a breakeven
+    # market (pnl ~= 0, vanishingly rare in practice) neither extends nor
+    # breaks a streak, only an actual loss does.
+    run = best_run = 0
+    for m in market_pnls:
+        if m["pnl"] > 1e-9:
+            run += 1
+            best_run = max(best_run, run)
+        elif m["pnl"] < -1e-9:
+            run = 0
+    if best_run >= 3:
+        earned.add("hot_streak")
+
+    high_roller_row = conn.execute(
+        "SELECT 1 FROM transactions WHERE user_id = ? AND type = 'trade' AND amount <= -250 LIMIT 1",
+        (user_id,),
+    ).fetchone()
+    if high_roller_row:
+        earned.add("high_roller")
+
+    category_count = conn.execute(
+        "SELECT COUNT(DISTINCT markets.category) c FROM transactions "
+        "JOIN markets ON markets.id = transactions.market_id "
+        "WHERE transactions.user_id = ? AND transactions.type = 'trade'",
+        (user_id,),
+    ).fetchone()["c"]
+    if category_count >= 5:
+        earned.add("market_explorer")
+
+    streak = user["daily_streak"] if "daily_streak" in user.keys() else 0
+    if streak >= 7:
+        earned.add("daily_devotee")
+
+    if "is_bot_trader" in user.keys() and user["is_bot_trader"]:
+        earned.add("bot_trader")
+
+    referral_count = conn.execute(
+        "SELECT COUNT(*) c FROM users WHERE referred_by_user_id = ?", (user_id,)
+    ).fetchone()["c"]
+    if referral_count >= 3:
+        earned.add("networker")
+
+    return earned
+
+
+def sync_achievements(conn, user):
+    """Persists any newly-qualifying achievements for `user` and returns
+    the full set of keys they've ever earned (existing + newly unlocked).
+    Safe to call on every /api/achievements request — INSERT OR IGNORE
+    means re-syncing an already-earned achievement is a no-op."""
+    qualifying = _currently_qualifying_achievements(conn, user)
+    if not qualifying:
+        return set()
+    existing = {
+        r["achievement_key"] for r in
+        conn.execute("SELECT achievement_key FROM user_achievements WHERE user_id = ?", (user["id"],)).fetchall()
+    }
+    new_keys = qualifying - existing
+    if new_keys:
+        now = now_iso()
+        for key in new_keys:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_achievements (user_id, achievement_key, earned_at) VALUES (?, ?, ?)",
+                (user["id"], key, now),
+            )
+        conn.commit()
+    return existing | new_keys
+
+
+@app.get("/api/achievements")
+@require_auth
+def achievements():
+    conn = db.get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    sync_achievements(conn, user)
+    earned_rows = {
+        r["achievement_key"]: r["earned_at"] for r in
+        conn.execute("SELECT achievement_key, earned_at FROM user_achievements WHERE user_id = ?", (user["id"],)).fetchall()
+    }
+    return jsonify([
+        {
+            "key": a["key"], "label": a["label"], "description": a["description"],
+            "earned": a["key"] in earned_rows,
+            "earned_at": earned_rows.get(a["key"]),
+        }
+        for a in ACHIEVEMENTS
+    ])
+
+
+@app.get("/api/referrals")
+@require_auth
+def referrals():
+    conn = db.get_db()
+    user_id = g.user["id"]
+    rows = conn.execute(
+        "SELECT username, created_at FROM users WHERE referred_by_user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    total_bonus_earned = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) s FROM transactions "
+        "WHERE user_id = ? AND type = 'referral_bonus'",
+        (user_id,),
+    ).fetchone()["s"]
+    return jsonify({
+        "referral_code": g.user["username"],
+        "referral_count": len(rows),
+        "total_bonus_earned": total_bonus_earned,
+        "referred_users": [{"username": r["username"], "created_at": r["created_at"]} for r in rows],
+    })
+
+
+# ---------- weekly challenges ----------
+#
+# Unlike ACHIEVEMENTS (permanent, earned once) these reset every week: the
+# reward is claimable again once a new week_key rolls over, same challenge
+# key and all. user_challenge_claims is keyed on (user_id, challenge_key,
+# week_key) so a stale claim from a previous week never blocks — or
+# double-pays — the current week's version of the same challenge.
+
+CHALLENGES = [
+    {
+        "key": "trade_5", "label": "Active Trader", "reward": 50.0,
+        "description": "Place 5 trades this week.",
+    },
+    {
+        "key": "diversify", "label": "Diversify", "reward": 75.0,
+        "description": "Trade in 3 different market categories this week.",
+    },
+    {
+        "key": "big_trade", "label": "Swing for the Fences", "reward": 75.0,
+        "description": "Place a single trade costing $100 or more this week.",
+    },
+]
+
+
+def current_week_start():
+    """UTC-Monday-00:00 start of the current week, as a naive datetime —
+    the boundary every challenge's "this week" activity is measured
+    against. Computed from wall-clock time rather than stored anywhere,
+    so it's always correct without a scheduled job to roll it over."""
+    now = datetime.datetime.utcnow()
+    return (now - datetime.timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def current_week_key():
+    """A short stable string identifying the current week, e.g.
+    '2026-08-17' for its Monday — used as the reset key in
+    user_challenge_claims, not shown to users."""
+    return current_week_start().strftime("%Y-%m-%d")
+
+
+def _currently_qualifying_challenges(conn, user_id, week_start_iso):
+    qualifying = set()
+
+    trade_count = conn.execute(
+        "SELECT COUNT(*) c FROM transactions WHERE user_id = ? AND type = 'trade' AND created_at >= ?",
+        (user_id, week_start_iso),
+    ).fetchone()["c"]
+    if trade_count >= 5:
+        qualifying.add("trade_5")
+
+    category_count = conn.execute(
+        "SELECT COUNT(DISTINCT markets.category) c FROM transactions "
+        "JOIN markets ON markets.id = transactions.market_id "
+        "WHERE transactions.user_id = ? AND transactions.type = 'trade' AND transactions.created_at >= ?",
+        (user_id, week_start_iso),
+    ).fetchone()["c"]
+    if category_count >= 3:
+        qualifying.add("diversify")
+
+    # 'trade' transactions store amount as the negative cost paid.
+    big_trade_row = conn.execute(
+        "SELECT 1 FROM transactions WHERE user_id = ? AND type = 'trade' "
+        "AND created_at >= ? AND amount <= -100 LIMIT 1",
+        (user_id, week_start_iso),
+    ).fetchone()
+    if big_trade_row:
+        qualifying.add("big_trade")
+
+    return qualifying
+
+
+def sync_challenges(conn, user):
+    """Same INSERT-OR-IGNORE-then-credit pattern as sync_achievements(),
+    scoped to the current week_key. Returns {key: claimed_at} for every
+    challenge claimed this week (existing + newly claimed just now)."""
+    user_id = user["id"]
+    week_key = current_week_key()
+    week_start_iso = current_week_start().isoformat()
+
+    existing = {
+        r["challenge_key"]: r["claimed_at"] for r in conn.execute(
+            "SELECT challenge_key, claimed_at FROM user_challenge_claims "
+            "WHERE user_id = ? AND week_key = ?",
+            (user_id, week_key),
+        ).fetchall()
+    }
+    qualifying = _currently_qualifying_challenges(conn, user_id, week_start_iso)
+    new_keys = qualifying - existing.keys()
+    if new_keys:
+        now = now_iso()
+        balance = user["balance"]
+        by_key = {c["key"]: c for c in CHALLENGES}
+        for key in new_keys:
+            reward = by_key[key]["reward"]
+            balance += reward
+            conn.execute(
+                "INSERT OR IGNORE INTO user_challenge_claims (user_id, challenge_key, week_key, claimed_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, key, week_key, now),
+            )
+            conn.execute(
+                "INSERT INTO transactions (user_id, type, amount, balance_after) "
+                "VALUES (?, 'weekly_challenge', ?, ?)",
+                (user_id, reward, balance),
+            )
+            existing[key] = now
+        conn.execute("UPDATE users SET balance = ? WHERE id = ?", (balance, user_id))
+        conn.commit()
+    return existing
+
+
+@app.get("/api/challenges")
+@require_auth
+def challenges():
+    conn = db.get_db()
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    claimed = sync_challenges(conn, user)
+    refreshed_balance = conn.execute("SELECT balance FROM users WHERE id = ?", (user["id"],)).fetchone()["balance"]
+    week_start = current_week_start()
+    reset_at = (week_start + datetime.timedelta(days=7)).isoformat()
+    return jsonify({
+        "balance": refreshed_balance,
+        "resets_at": reset_at,
+        "challenges": [
+            {
+                "key": c["key"], "label": c["label"], "description": c["description"],
+                "reward": c["reward"],
+                "completed": c["key"] in claimed,
+                "completed_at": claimed.get(c["key"]),
+            }
+            for c in CHALLENGES
+        ],
     })
 
 

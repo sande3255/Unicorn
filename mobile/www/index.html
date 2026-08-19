@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <!-- viewport-fit=cover opts into safe-area-inset-* CSS env() variables
+       (see mobile.css) so content clears the iPhone notch/Dynamic Island
+       and the bottom home-indicator instead of running under them. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>UNICORN — play-money prediction markets</title>
+  <meta name="description" content="UNICORN is a play-money prediction market demo — trade YES/NO shares on live crypto, stock, and index price moves, plus imported Kalshi/Polymarket questions. No real money, ever." />
+  <meta name="theme-color" content="#070705" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23070705'/%3E%3Ccircle cx='12' cy='12' r='8' stroke='%23ffc61a' stroke-width='1.8' fill='none'/%3E%3Ccircle cx='12' cy='12' r='2.4' fill='%23ffc61a'/%3E%3Cg stroke='%23ffc61a' stroke-width='1.8' stroke-linecap='round'%3E%3Cline x1='12' y1='1.5' x2='12' y2='5.5'/%3E%3Cline x1='12' y1='18.5' x2='12' y2='22.5'/%3E%3Cline x1='1.5' y1='12' x2='5.5' y2='12'/%3E%3Cline x1='18.5' y1='12' x2='22.5' y2='12'/%3E%3C/g%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="mobile.css" />
+  <!--
+    This file is bundled INSIDE the native app (not served from Railway),
+    so app.js's relative fetch('/api/...') calls have no same-origin API
+    to reach — they'd just 404 against the app's own local bundle. Setting
+    UNICORN_API_BASE before app.js loads points every API call at the live
+    backend instead. This is the ONE substantive difference from
+    frontend/index.html; everything else about this file is either
+    identical or a deliberate mobile-only trim (see below). Update this if
+    the Railway URL ever changes.
+  -->
+  <script>window.UNICORN_API_BASE = 'https://web-production-1e774.up.railway.app';</script>
+</head>
+<body>
+  <div class="hazard-stripe"></div>
+  <div id="banner">
+    ☠ DEMO — play money only. Not connected to any real payment method. Read the README before doing anything with real funds.
+  </div>
+  <!--
+    frontend/index.html's #support-banner (the PayPal "help fund real-money
+    licensing" donation link) is deliberately left out of this file. It's
+    not a rules violation to keep it — it's a plain external donation link,
+    not an IAP-unlockable feature — but App Store review scrutinizes any
+    payment-adjacent link more than a normal website does, and this app
+    doesn't need that extra scrutiny for something that isn't core to the
+    product. initSupportBanner() in app.js already no-ops safely when
+    #support-banner doesn't exist in the DOM, so omitting the div here is
+    the entire change needed — nothing to touch in app.js itself.
+  -->
+  <header id="site-header">
+    <div class="header-inner">
+      <a href="#/markets" class="brand">
+        <svg class="brand-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.6"/>
+          <circle cx="12" cy="12" r="2.3" fill="currentColor"/>
+          <g stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <line x1="12" y1="1.5" x2="12" y2="6.2"/>
+            <line x1="12" y1="17.8" x2="12" y2="22.5"/>
+            <line x1="1.5" y1="12" x2="6.2" y2="12"/>
+            <line x1="17.8" y1="12" x2="22.5" y2="12"/>
+            <line x1="4.5" y1="4.5" x2="7.7" y2="7.7"/>
+            <line x1="16.3" y1="16.3" x2="19.5" y2="19.5"/>
+            <line x1="4.5" y1="19.5" x2="7.7" y2="16.3"/>
+            <line x1="16.3" y1="7.7" x2="19.5" y2="4.5"/>
+          </g>
+        </svg>
+        <span class="brand-name">UNICORN</span>
+      </a>
+      <nav id="main-nav"></nav>
+      <div id="auth-area"></div>
+    </div>
+  </header>
+  <div class="hazard-stripe"></div>
+  <main id="app"></main>
+  <footer id="site-footer">
+    <div class="footer-inner">
+      <span>UNICORN&trade; &mdash; Sanders, 2026</span>
+      <span class="footer-sep">&middot;</span>
+      <a href="#/faq">Rules &amp; FAQ</a>
+      <span class="footer-sep">&middot;</span>
+      <span class="muted">Play money only &mdash; not real financial advice or real trading.</span>
+    </div>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

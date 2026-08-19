@@ -1,0 +1,29 @@
+/* Mobile-app-only overrides, loaded after styles.css so these rules win.
+   Nothing here changes anything about how the site itself looks on the
+   web — this file only exists inside the native app bundle. */
+
+/* iPhones with a notch/Dynamic Island or a home-indicator report how much
+   of the screen those occupy via env(safe-area-inset-*), but only once
+   the page has opted in via <meta name="viewport" content="...
+   viewport-fit=cover"> (see index.html). Without this, the demo banner
+   at the very top of the page and the footer at the very bottom would
+   render partly underneath the notch / home-indicator instead of
+   clearing them. The @supports guard means this is a no-op on browsers
+   that don't know what env() is, rather than an invalid/ignored value. */
+@supports (padding-top: env(safe-area-inset-top)) {
+  #banner {
+    padding-top: calc(6px + env(safe-area-inset-top));
+  }
+  #site-footer {
+    padding-bottom: calc(18px + env(safe-area-inset-bottom));
+  }
+}
+
+/* The web version is a page in a browser chrome that already provides its
+   own pull-to-refresh and overscroll glow; inside a native WebView with
+   no browser chrome around it, the same gestures just look like a broken
+   scroll. Disabling both keeps the app feeling like an app rather than a
+   website wrapped in a window. */
+html, body {
+  overscroll-behavior-y: contain;
+}
