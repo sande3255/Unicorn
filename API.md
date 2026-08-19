@@ -188,6 +188,25 @@ than rejected. When it does match, both accounts are credited a flat
 $250 play-money bonus the moment the new account is created — see
 `REFERRAL_BONUS_REFEREE`/`REFERRAL_BONUS_REFERRER` in `server.py`.
 
+### `GET /api/markets/<id>/comments` — a market's discussion thread
+
+No auth required. Last 200 comments on the market, newest first:
+`{id, market_id, user_id, username, body, created_at}`. 404s if the
+market doesn't exist.
+
+### `POST /api/markets/<id>/comments` — post a comment
+
+Auth required (session or API key). Body: `{body}`, 1–500 characters
+after trimming whitespace; empty or over-length bodies are rejected
+with 400. Returns the created comment in the same shape as the list
+endpoint above. 404s if the market doesn't exist.
+
+### `DELETE /api/comments/<id>` — delete a comment
+
+Auth required (session or API key). You can only delete your own
+comments — admins can delete any comment. 403 if it's someone else's
+and you're not an admin, 404 if the comment doesn't exist.
+
 ### `GET /api/transactions` — your trade history
 
 Auth required (session or API key). Last 500 rows, newest first:
