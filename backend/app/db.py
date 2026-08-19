@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -228,6 +229,21 @@ TRANSACTION_COLUMN_MIGRATIONS = [
     ("fee_amount", "REAL DEFAULT 0"),
 ]
 
+SESSION_COLUMN_MIGRATIONS = [
+    # Bumped on every authenticated request this token makes (best-effort,
+    # same pattern as api_keys.last_used_at). Backs the idle-timeout half
+    # of session expiry in get_current_user() (server.py) — a token that
+    # hasn't been used in SESSION_IDLE_TIMEOUT_DAYS is treated as expired
+    # even if it's well within the absolute lifetime.
+    #
+    # No DEFAULT CURRENT_TIMESTAMP here — SQLite's ALTER TABLE ADD COLUMN
+    # only accepts constant defaults, not CURRENT_TIMESTAMP ("Cannot add a
+    # column with non-constant default"). New rows get it explicitly via
+    # the INSERT in signup()/login(); existing rows are backfilled from
+    # created_at just below.
+    ("last_used_at", "TEXT"),
+]
+
 
 def _migrate(conn):
     """Add any new columns to existing tables (safe to re-run)."""
@@ -273,6 +289,23 @@ def _migrate(conn):
     for name, coltype in TRANSACTION_COLUMN_MIGRATIONS:
         if name not in existing_txn_cols:
             conn.execute(f"ALTER TABLE transactions ADD COLUMN {name} {coltype}")
+
+    existing_session_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+    for name, coltype in SESSION_COLUMN_MIGRATIONS:
+        if name not in existing_session_cols:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {name} {coltype}")
+    # Backfill: every pre-existing session (and any inserted before this
+    # column existed) starts the idle-timeout clock from its created_at
+    # rather than NULL, so upgrading doesn't instantly expire everyone's
+    # session on the next request.
+    conn.execute("UPDATE sessions SET last_used_at = created_at WHERE last_used_at IS NULL")
+    # get_current_user() looks up a session by token (already the primary
+    # key, so that half is free) and, on every authenticated request,
+    # deletes rows that fail the idle/absolute expiry check — an index on
+    # last_used_at keeps a future batch cleanup job (or the expiry check
+    # itself, if it's ever rewritten to scan instead of point-check) from
+    # doing a full table scan once sessions accumulate.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_last_used ON sessions(last_used_at)")
 
     # Every comment list/insert filters or sorts by (market_id, created_at) —
     # see list_comments()/create_comment() in server.py.

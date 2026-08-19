@@ -106,6 +106,29 @@ def now_iso():
     return datetime.datetime.utcnow().isoformat()
 
 
+# Session tokens previously never expired — a leaked token worked forever,
+# which is fine for a localhost demo but not once this is on a public URL
+# (see README "Known limitations"). Two independent caps, whichever is hit
+# first ends the session: an idle timeout (token unused this long) and an
+# absolute lifetime (token exists this long, active or not) so a token
+# that's used constantly still eventually forces a fresh login.
+SESSION_IDLE_TIMEOUT_DAYS = 30
+SESSION_ABSOLUTE_TIMEOUT_DAYS = 90
+
+
+def _parse_db_timestamp(value):
+    """Session created_at/last_used_at are stored as SQLite
+    CURRENT_TIMESTAMP strings ('YYYY-MM-DD HH:MM:SS', UTC, no offset) or
+    (for rows created via new_token() elsewhere) datetime.isoformat()
+    output — accept both rather than assuming one format."""
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(value, fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
 # ---------- auth helpers ----------
 #
 # Two credential types share one Authorization header scheme (`Bearer
@@ -147,13 +170,37 @@ def get_current_user():
         return row
 
     row = conn.execute(
-        "SELECT users.* FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?",
+        "SELECT users.*, sessions.created_at AS session_created_at, "
+        "sessions.last_used_at AS session_last_used_at "
+        "FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token = ?",
         (token,),
     ).fetchone()
-    if row is not None:
-        g.rate_limit_identity = f"user:{row['id']}"
-        g.auth_method = "session"
-        g.auth_can_trade = True
+    if row is None:
+        return None
+
+    now = datetime.datetime.utcnow()
+    created = _parse_db_timestamp(row["session_created_at"])
+    last_used = _parse_db_timestamp(row["session_last_used_at"]) or created
+    idle_expired = last_used is not None and (now - last_used).days >= SESSION_IDLE_TIMEOUT_DAYS
+    absolute_expired = created is not None and (now - created).days >= SESSION_ABSOLUTE_TIMEOUT_DAYS
+    if idle_expired or absolute_expired:
+        # Clean up the dead row rather than just rejecting it, so an
+        # abandoned token doesn't sit in the table forever.
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+        return None
+
+    g.rate_limit_identity = f"user:{row['id']}"
+    g.auth_method = "session"
+    g.auth_can_trade = True
+    try:
+        # Best-effort, same pattern as the api_keys.last_used_at touch
+        # above — sliding the idle-timeout window forward shouldn't be
+        # able to break auth if it fails.
+        conn.execute("UPDATE sessions SET last_used_at = ? WHERE token = ?", (now_iso(), token))
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        pass
     return row
 
 
@@ -325,6 +372,10 @@ REFERRAL_BONUS_REFERRER = 250.0
 
 
 @app.post("/api/signup")
+# Unauthenticated, so this limits by IP (see ratelimit.py's
+# _client_identity) — capped tighter than most endpoints since the only
+# thing behind this one is spam account creation.
+@rate_limit(5, 60)
 def signup():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip()
@@ -379,7 +430,16 @@ def signup():
             f"{username} signed up using your referral link — you earned ${REFERRAL_BONUS_REFERRER:,.2f}.",
         )
     token = new_token()
-    conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
+    # created_at/last_used_at set explicitly rather than relying on the
+    # column defaults — those only apply on a freshly created database; a
+    # database that went through the sessions.last_used_at migration has
+    # no default on that column at all (see SESSION_COLUMN_MIGRATIONS),
+    # so an INSERT that omitted it would silently write NULL there.
+    _session_now = now_iso()
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at, last_used_at) VALUES (?, ?, ?, ?)",
+        (token, user_id, _session_now, _session_now),
+    )
     conn.commit()
 
     return jsonify({
@@ -391,6 +451,10 @@ def signup():
 
 
 @app.post("/api/login")
+# Unauthenticated (by IP), and the one endpoint where rate limiting
+# actually matters for security, not just abuse prevention — without this,
+# nothing stops an unlimited password-guessing loop against any username.
+@rate_limit(10, 60)
 def login():
     data = request.get_json(force=True, silent=True) or {}
     username = (data.get("username") or "").strip()
@@ -402,7 +466,11 @@ def login():
         return jsonify({"detail": "Invalid username or password"}), 401
 
     token = new_token()
-    conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user["id"]))
+    _session_now = now_iso()
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at, last_used_at) VALUES (?, ?, ?, ?)",
+        (token, user["id"], _session_now, _session_now),
+    )
     conn.commit()
     return jsonify({
         "token": token, "username": user["username"],
@@ -590,7 +658,11 @@ def wallet_login():
         }), 404
 
     token = new_token()
-    conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user["id"]))
+    _session_now = now_iso()
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, created_at, last_used_at) VALUES (?, ?, ?, ?)",
+        (token, user["id"], _session_now, _session_now),
+    )
     conn.commit()
     return jsonify({
         "token": token, "username": user["username"],

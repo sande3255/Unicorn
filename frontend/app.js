@@ -93,7 +93,8 @@ const API_BASE = (typeof window !== 'undefined' && window.UNICORN_API_BASE) || '
 
 async function api(path, { method = 'GET', body = null, auth = true } = {}) {
   const headers = { 'Content-Type': 'application/json' };
-  if (auth && state.token) headers['Authorization'] = `Bearer ${state.token}`;
+  const sentToken = auth && !!state.token;
+  if (sentToken) headers['Authorization'] = `Bearer ${state.token}`;
   const res = await fetch(API_BASE + path, {
     method,
     headers,
@@ -102,6 +103,17 @@ async function api(path, { method = 'GET', body = null, auth = true } = {}) {
   let data = null;
   try { data = await res.json(); } catch (e) { /* no body */ }
   if (!res.ok) {
+    // A 401 on a request that actually carried a token means the session
+    // itself is gone — expired (see SESSION_IDLE_TIMEOUT_DAYS /
+    // SESSION_ABSOLUTE_TIMEOUT_DAYS server-side) or revoked, not "wrong
+    // password" (that 401 comes from /api/login with auth:false, so
+    // sentToken is false there and this branch doesn't fire). Clear the
+    // dead session and send them to log back in instead of leaving
+    // whatever form they were using stuck on a bare "Not authenticated".
+    if (res.status === 401 && sentToken) {
+      logout();
+      throw new Error('Your session expired — please log in again.');
+    }
     const msg = (data && data.detail) ? data.detail : `Request failed (${res.status})`;
     throw new Error(msg);
   }
