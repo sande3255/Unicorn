@@ -4,10 +4,11 @@ A working prediction-market application in the style of Kalshi/Polymarket:
 users trade YES/NO shares on event outcomes, prices move automatically via
 an AMM, and markets settle for $1 (winning side) or $0 (losing side).
 Alongside markets an admin creates by hand, UNICORN also runs a menu of
-**auto-generated crypto, stock, and commodity markets** on a rolling 5- and
-15-minute clock, settled against real live prices, and **imports trending
-markets from Kalshi and Polymarket** — real questions, seeded at their real
-current odds, auto-resolved here once the real market settles.
+**auto-generated crypto, stock, index, commodity, forex, and weather
+markets** on a rolling 5- and 15-minute clock, settled against real live
+prices (or, for weather, real live temperature readings), and **imports
+trending markets from Kalshi and Polymarket** — real questions, seeded at
+their real current odds, auto-resolved here once the real market settles.
 
 **This runs entirely on play money. There is no payment processor, no real
 currency, and no connection to any bank or wallet.** Read "Before this can
@@ -115,6 +116,22 @@ meant to be reachable by anyone else. To put UNICORN on a real URL:
      backed by a metered/paid API, so keep an eye on your plan's request
      quota; see the cadence comment on `ODDS_SYNC_EVERY_N_TICKS` in
      `backend/app/scheduler.py` if you need to tune how often it polls.
+   - `RESEND_API_KEY` (optional) — a key from [resend.com](https://resend.com)
+     turns on password-reset emails (see "Password reset" below). Leave it
+     unset and "Forgot password?" still works from the user's point of
+     view (same generic response either way, so it doesn't leak which
+     accounts exist) — it just logs a failure server-side instead of
+     actually sending anything.
+   - `RESEND_FROM_EMAIL` (optional) — the sender address reset emails come
+     from. Defaults to Resend's shared `onboarding@resend.dev` test
+     sender, which needs no domain verification but only delivers to the
+     email on your own Resend account — verify a domain in Resend and set
+     this once you want reset emails reaching real users.
+   - `APP_BASE_URL` (optional) — overrides the base URL used to build the
+     reset link in that email (e.g. `https://your-app.up.railway.app`).
+     Defaults to the incoming request's own URL, which is normally
+     correct; set this explicitly if you're behind a proxy that URL
+     doesn't reflect accurately.
 5. **Deploy, then generate a domain** (Settings → Networking → Generate
    Domain). Railway assigns a `*.up.railway.app` URL — that's your live
    site.
@@ -145,13 +162,13 @@ after deploy. Watch the deploy logs the first few minutes to confirm.
 ## The auto-generated timed markets
 
 Defined in `backend/app/scheduler.py`'s `AUTO_MARKET_CONFIGS` list — a
-**fixed, curated roster of 48 templates**, and (with Kalshi/Polymarket
+**fixed, curated roster of 59 templates**, and (with Kalshi/Polymarket
 imports switched off by default, see below) effectively the entire board.
 The philosophy: a short, recognizable, "definitive" list of American names
 rather than a sprawling long tail — nobody has time to research an obscure
 altcoin or sit around waiting on a slow real-world event to resolve. It's
-all the same format — "will this be above or below its current price in N
-minutes" — across three asset classes:
+all the same format — "will this be above or below its current reading in
+N minutes" — across six asset classes:
 
 | Group | Assets | Interval |
 |---|---|---|
@@ -160,40 +177,46 @@ minutes" — across three asset classes:
 | Crypto · 5 min | BTC, ETH, SOL, XRP, DOGE, BNB, ADA, AVAX, LINK, LTC | every 5 minutes |
 | Crypto · 15 min | same 10 coins as above | every 15 minutes |
 | Indices · 15 min | S&P 500, Nasdaq Composite, Dow Jones, Russell 2000 | every 15 minutes |
+| Commodities · 15 min | Gold, Silver, Crude Oil | every 15 minutes |
+| Forex · 15 min | EUR/USD, GBP/USD, USD/JPY | every 15 minutes |
+| Weather · 15 min | New York City, Los Angeles, Chicago, Miami, Denver (temperature) | every 15 minutes |
 
-That's 24 + 20 + 4 = **48 open market slots**, each a clear win-or-lose
-call inside 5 or 15 minutes. Every 15 seconds, the scheduler: makes sure each template has one open
+That's 24 + 20 + 4 + 3 + 3 + 5 = **59 open market slots**, each a clear
+win-or-lose call inside 5 or 15 minutes. Every 15 seconds, the scheduler: makes sure each template has one open
 market live (creating a new one — "Will X be above $current_price in N
-minutes?" — if the last one closed), refreshes the live price shown on
+minutes?" — if the last one closed), refreshes the live reading shown on
 each open market, and resolves anything past its close time by comparing
-the price at settlement to the strike price it opened at. Edit the config
-list to add, remove, or retime markets — nothing else needs to change.
+the reading at settlement to the strike reading it opened at. Edit the
+config list to add, remove, or retime markets — nothing else needs to
+change.
 
-**Stocks and indices both trade off Yahoo Finance's chart endpoint**
-(`price_feed.py`'s `get_stock_price`/`get_index_price` are thin aliases
-over the same lookup used for commodities, kept in the codebase even
-though commodities/forex aren't in the default roster anymore — see
-below). Outside US market hours (nights, weekends, holidays) stocks and
-indices return the last traded price rather than a live tick, so a
+**Stocks, indices, commodities, and forex all trade off Yahoo Finance's
+chart endpoint** (`price_feed.py`'s `get_stock_price`/`get_index_price`/
+`get_forex_price` are thin aliases over the same lookup used for
+commodities). Outside US market hours (nights, weekends, holidays) stocks
+and indices return the last traded price rather than a live tick, so a
 5-minute stock market opened at 2am ET will likely settle at the same
-price it opened at (a "tie" resolves NO here, i.e. price must be strictly
-*above* strike to pay YES) — this is a demo data-feed limitation, not a
-bug.
+price it opened at (a "tie" resolves NO here, i.e. the reading must be
+strictly *above* strike to pay YES) — this is a demo data-feed limitation,
+not a bug. Forex trades ~24/5 (closed weekends), so it stays live more of
+the time than stocks/indices do. **Weather trades off Open-Meteo**
+(`price_feed.py`'s `get_weather_temp`) — free, no API key, current
+conditions only, looked up by each city's fixed lat/lon rather than a
+geocoding step.
 
-**16 unique symbols now hit Yahoo Finance's endpoint every 15-second
-tick** (12 stocks + 4 indices) — comfortably fine for a demo, but if you
-see rate-limit errors in the logs after adding more assets, either raise
-`TICK_SECONDS` or trim `AUTO_MARKET_CONFIGS`.
+**22 unique symbols now hit Yahoo Finance's endpoint every 15-second
+tick** (12 stocks + 4 indices + 3 commodities + 3 forex pairs) — comfortably
+fine for a demo, but if you see rate-limit errors in the logs after adding
+more assets, either raise `TICK_SECONDS` or trim `AUTO_MARKET_CONFIGS`.
 
 **Trimmed from the default roster (still supported by the code, just not
 listed in `AUTO_MARKET_CONFIGS` today):** the long tail of altcoins
 (MATIC, NEAR, APT, ARB, OP, DOT, TRX, ATOM, UNI, SHIB, INJ, FIL, ICP, ETC,
-XLM), commodities (Gold, Silver, Crude Oil, Brent Crude, Natural Gas,
-Copper, Platinum, Palladium, Corn), forex pairs (EUR/USD, GBP/USD,
-USD/JPY, USD/CHF, AUD/USD), and 3 stocks (WMT, BAC, AMD). `price_feed.py`
-still knows how to price all of them — add any back into
-`AUTO_MARKET_CONFIGS` (and bump `_STOCKS`/`_CRYPTO` or reintroduce the
-commodity/forex config blocks) if you want a broader board again.
+XLM), the wider commodity/forex universe (Brent Crude, Natural Gas,
+Copper, Platinum, Palladium, Corn, USD/CHF, AUD/USD), and 3 stocks (WMT,
+BAC, AMD). `price_feed.py` still knows how to price all of them — add any
+back into `AUTO_MARKET_CONFIGS` (and bump `_STOCKS`/`_CRYPTO`/
+`_COMMODITIES`/`_FOREX`) if you want a broader board again.
 
 ### Why CoinGecko, not Binance
 
@@ -212,7 +235,7 @@ per-symbol Binance calls did.
 
 ## Keeping the board 100% fast, definitive markets
 
-The 48 timed templates always have exactly one open market each — churning
+The 59 timed templates always have exactly one open market each — churning
 every 5-15 minutes keeps that count constant. Kalshi/Polymarket imports
 don't churn the same way (a real-world market can stay open for weeks or
 months, the "sit around for a baseball game" problem), so `scheduler.py`
@@ -326,6 +349,34 @@ machine. Run `pip install -r requirements.txt`, connect a real wallet,
 and confirm link/login actually work before trusting this in front of
 other people.
 
+## Password reset
+
+Signup only ever collects a username and password — no email required.
+From the **Account** page, a user can optionally add an email; once set,
+"Forgot password?" on the login page can send that account a reset link.
+An account with no email on file gets the same generic "if that account
+has an email on file, we've sent a link" response as one that doesn't
+exist — the point is that neither the login page nor the API response
+ever confirms or denies which usernames are registered.
+
+Emails go out via [Resend](https://resend.com)'s HTTP API
+(`app/email_feed.py`, stdlib `urllib` only — no SMTP library or extra
+dependency) rather than SMTP. See `RESEND_API_KEY`/`RESEND_FROM_EMAIL`/
+`APP_BASE_URL` in "Deploying to Railway" above for the environment
+variables that turn it on; unset, the feature no-ops (logs, doesn't
+crash, doesn't change the response the requester sees).
+
+Reset links are one-time and expire after `RESET_TOKEN_TTL_MINUTES` (60)
+in `server.py`. The token itself is never stored in the database — only
+its SHA-256 hash (`password_reset_tokens.token_hash`), the same "high-
+entropy random token, not a human password, so a fast hash is the
+correct and sufficient choice" reasoning API keys already use (see
+`security.py`'s `hash_api_key`). Completing a reset immediately deletes
+every existing session for that account — anywhere it was logged in,
+including on another device — since a password reset is exactly the
+moment a leaked-password scenario would otherwise let a stale session
+token keep working right past the change.
+
 ## How the pricing works
 
 Each market has a liquidity parameter `b`. Buying shares of an outcome
@@ -374,12 +425,20 @@ actually exists.
 
 ## Known limitations of the demo
 
-- **Session tokens don't expire and there's no rate limiting.** Harmless
-  for a local demo; on a public Railway URL it means a leaked token works
-  forever and there's nothing stopping someone from hammering `/api/*`.
-  Worth fixing before pointing anyone beyond friends-testing-it at the
-  deployed URL.
-- No password reset flow.
+- **Session tokens now expire** — 30 days idle, or 90 days absolute
+  lifetime regardless of activity, whichever comes first (see
+  `SESSION_IDLE_TIMEOUT_DAYS`/`SESSION_ABSOLUTE_TIMEOUT_DAYS` in
+  `server.py`) — and **login/signup are rate-limited** (10/60s and 5/60s
+  per IP respectively, via the same `ratelimit.py` every other write
+  endpoint already used). A leaked token no longer works forever, and
+  nothing can hammer `/api/login` in an unlimited password-guessing loop
+  anymore.
+- **Password reset now exists** (email-based, via Resend — see
+  `RESEND_API_KEY`/`RESEND_FROM_EMAIL`/`APP_BASE_URL` above) but is opt-in
+  per account: signup still only collects a username and password, so a
+  user has to add an email from the Account page before "Forgot
+  password?" has anywhere to send a reset link. An account with no email
+  on file just can't self-serve a reset today.
 - Yahoo Finance's chart endpoint is unofficial/undocumented; it can change
   shape or rate-limit without notice. The scheduler logs and skips a tick
   on failure rather than crashing, but don't rely on it for anything that

@@ -148,6 +148,24 @@ CREATE TABLE IF NOT EXISTS notifications (
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (market_id) REFERENCES markets(id)
 );
+
+-- A row per issued "forgot password" link. token_hash, not the plaintext
+-- token, is stored — same reasoning as api_keys.key_hash (see
+-- security.py's hash_api_key): a high-entropy random token nobody
+-- memorizes, so a fast SHA-256 lookup is both secure and cheap to check.
+-- used_at is set the moment the token is redeemed so it can never be
+-- replayed even if someone captures the reset email in transit; expiry
+-- (RESET_TOKEN_TTL_MINUTES in server.py) is enforced against created_at
+-- at check time rather than a stored expires_at, same style as session
+-- expiry.
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    token_hash TEXT UNIQUE NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    used_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
 """
 
 
@@ -219,6 +237,13 @@ USER_COLUMN_MIGRATIONS = [
     # never changed afterward. See signup() and GET /api/referrals in
     # server.py.
     ("referred_by_user_id", "INTEGER"),
+    # Optional, lowercased. Not collected at signup (signup is still just
+    # username+password) — a user adds one later from the Account page if
+    # they want password-reset-by-email to work for their account. NULL
+    # here just means "forgot password" has nothing to send to; it's not
+    # an error state. See POST /api/account/email and POST
+    # /api/forgot-password in server.py.
+    ("email", "TEXT"),
 ]
 
 TRANSACTION_COLUMN_MIGRATIONS = [
@@ -284,6 +309,13 @@ def _migrate(conn):
         "CREATE INDEX IF NOT EXISTS idx_users_referred_by ON users(referred_by_user_id) "
         "WHERE referred_by_user_id IS NOT NULL"
     )
+    # Same partial-unique pattern as idx_users_wallet_address just above —
+    # an email can only ever be attached to one account, but most rows
+    # have NULL here (email is optional, added after signup), and a plain
+    # UNIQUE column constraint would collide every NULL against every
+    # other NULL.
+    conn.execute("DROP INDEX IF EXISTS idx_users_email")
+    conn.execute("CREATE UNIQUE INDEX idx_users_email ON users(email) WHERE email IS NOT NULL")
 
     existing_txn_cols = {row[1] for row in conn.execute("PRAGMA table_info(transactions)").fetchall()}
     for name, coltype in TRANSACTION_COLUMN_MIGRATIONS:

@@ -1,11 +1,12 @@
 import datetime
 import mimetypes
 import os
+import re
 from functools import wraps
 
 from flask import Flask, request, jsonify, g, send_from_directory
 
-from . import db, amm, scheduler, wallet_auth
+from . import db, amm, scheduler, wallet_auth, email_feed
 from .security import (
     hash_password, verify_password, new_token,
     generate_api_key, hash_api_key, API_KEY_PREFIX,
@@ -479,6 +480,95 @@ def login():
     })
 
 
+# ---------- password reset (email-based) ----------
+#
+# forgot_password() always returns the same generic response whether or
+# not the username/email matched an account, and whether or not that
+# account has an email on file — a different response for "no such
+# account" vs "account exists but no email set" would let anyone probe
+# which usernames/emails are registered. The only place real information
+# ever appears is in the email itself, sent to an address the requester
+# already had to know.
+
+RESET_TOKEN_TTL_MINUTES = 60
+_FORGOT_PASSWORD_GENERIC_RESPONSE = {
+    "detail": "If that account has an email on file, we've sent a password reset link to it.",
+}
+
+
+@app.post("/api/forgot-password")
+# Tight limit, by IP — this endpoint's whole job is "look up an account by
+# untrusted input", exactly the shape of thing brute-forcing/enumeration
+# abuses.
+@rate_limit(5, 60)
+def forgot_password():
+    data = request.get_json(force=True, silent=True) or {}
+    identifier = (data.get("username") or "").strip()
+
+    conn = db.get_db()
+    user = conn.execute(
+        "SELECT * FROM users WHERE username = ? OR email = ?",
+        (identifier, identifier.lower()),
+    ).fetchone()
+
+    if user is not None and user["email"]:
+        token = new_token()
+        conn.execute(
+            "INSERT INTO password_reset_tokens (user_id, token_hash) VALUES (?, ?)",
+            (user["id"], hash_api_key(token)),  # SHA-256 — see hash_api_key's docstring for why that's the right call for a random token, not PBKDF2
+        )
+        conn.commit()
+        base_url = os.environ.get("APP_BASE_URL", request.url_root).rstrip("/")
+        reset_url = f"{base_url}/#/reset-password?token={token}"
+        try:
+            email_feed.send_password_reset_email(user["email"], reset_url)
+        except email_feed.EmailFeedError as e:
+            # Logged, not surfaced — the caller gets the same generic
+            # response either way (see module note above), and a
+            # misconfigured/down email provider shouldn't turn into a 500
+            # for someone who just wants to reset their password, or a
+            # signal that distinguishes "account exists" from "doesn't".
+            print(f"[forgot-password] failed to send reset email to user {user['id']}: {e}")
+
+    return jsonify(_FORGOT_PASSWORD_GENERIC_RESPONSE)
+
+
+@app.post("/api/reset-password")
+@rate_limit(10, 60)
+def reset_password():
+    data = request.get_json(force=True, silent=True) or {}
+    token = (data.get("token") or "").strip()
+    new_password = data.get("new_password") or ""
+    if not token:
+        return jsonify({"detail": "Missing reset token"}), 400
+    if len(new_password) < 6:
+        return jsonify({"detail": "Password must be at least 6 characters"}), 400
+
+    conn = db.get_db()
+    row = conn.execute(
+        "SELECT * FROM password_reset_tokens WHERE token_hash = ?", (hash_api_key(token),)
+    ).fetchone()
+    if row is None:
+        return jsonify({"detail": "This reset link is invalid or has already been used"}), 400
+    if row["used_at"] is not None:
+        return jsonify({"detail": "This reset link has already been used"}), 400
+    created = _parse_db_timestamp(row["created_at"])
+    if created is None or (datetime.datetime.utcnow() - created).total_seconds() > RESET_TOKEN_TTL_MINUTES * 60:
+        return jsonify({"detail": "This reset link has expired — request a new one"}), 400
+
+    pw_hash = hash_password(new_password)
+    conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (pw_hash, row["user_id"]))
+    conn.execute("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?", (now_iso(), row["id"]))
+    # A password reset is exactly the moment to force every existing
+    # session for this account to log out — if the reset was prompted by
+    # a leaked password, whoever had it may also be sitting on a live
+    # session token that would otherwise keep working right past the
+    # password change.
+    conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
+    conn.commit()
+    return jsonify({"detail": "Password reset — log in with your new password."})
+
+
 @app.get("/api/me")
 @require_auth
 def me():
@@ -487,8 +577,40 @@ def me():
     return jsonify({
         "username": u["username"], "balance": u["balance"], "is_admin": bool(u["is_admin"]),
         "wallet_address": u["wallet_address"] if "wallet_address" in u.keys() else None,
+        "email": u["email"] if "email" in u.keys() else None,
         "daily_streak": streak, "daily_bonus_claimable": claimable,
     })
+
+
+# ---------- account email (for password-reset-by-email) ----------
+#
+# Not collected at signup — signup is still just username+password, so
+# existing accounts aren't broken by this column showing up. A user opts
+# in later from the Account page if they want "forgot password" to work
+# for their account. See password reset section below.
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@app.post("/api/account/email")
+@require_session_auth  # account-security-sensitive, same reasoning as api-keys/wallet management
+@rate_limit(10, 60)
+def set_account_email():
+    data = request.get_json(force=True, silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email or not _EMAIL_RE.match(email):
+        return jsonify({"detail": "Enter a valid email address"}), 400
+
+    conn = db.get_db()
+    existing = conn.execute(
+        "SELECT id FROM users WHERE email = ? AND id != ?", (email, g.user["id"])
+    ).fetchone()
+    if existing:
+        return jsonify({"detail": "That email is already attached to another account"}), 400
+
+    conn.execute("UPDATE users SET email = ? WHERE id = ?", (email, g.user["id"]))
+    conn.commit()
+    return jsonify({"email": email})
 
 
 # ---------- daily login bonus (play-money only, obviously) ----------

@@ -411,6 +411,11 @@ const routes = [
   // renderLogin() reads it straight off location.hash rather than via a
   // capture group here, so this just needs to not reject the route.
   { pattern: /^#\/login(\?.*)?$/, handler: renderLogin, title: 'Log in' },
+  { pattern: /^#\/forgot-password$/, handler: renderForgotPassword, title: 'Forgot password' },
+  // ?token=... carries the reset token — read off location.hash inside
+  // the handler, same pattern as #/login's ?ref= and #/market's own
+  // capture group not being reused for query strings.
+  { pattern: /^#\/reset-password(\?.*)?$/, handler: renderResetPassword, title: 'Reset password' },
   { pattern: /^#\/faq$/, handler: renderFaq, title: 'Rules & FAQ' },
 ];
 
@@ -1392,6 +1397,15 @@ async function renderAccount() {
       <p class="muted">Link a wallet to sign in with it instead of your password. Linking only proves you control the address — it never moves any real crypto, and your balance stays UNICORN's own play money either way.</p>
       <div id="wallet-status">Loading…</div>
     </div>
+    <div class="card">
+      <h2>Email</h2>
+      <p class="muted">Optional — add one so "Forgot password?" on the login page has somewhere to send a reset link. Signing up never required one, so this stays blank until you set it.</p>
+      <form id="email-form" class="inline-form">
+        <input id="email-input" type="email" placeholder="you@example.com" value="${escapeHtml(state.user.email || '')}" required />
+        <button type="submit" class="btn primary">${state.user.email ? 'Update' : 'Save'}</button>
+      </form>
+      <div id="email-result"></div>
+    </div>
   `;
   document.getElementById('deposit-form').onsubmit = async (e) => {
     e.preventDefault();
@@ -1411,6 +1425,18 @@ async function renderAccount() {
     }
   };
   renderWalletStatus();
+  document.getElementById('email-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const resultEl = document.getElementById('email-result');
+    const email = document.getElementById('email-input').value.trim();
+    try {
+      const result = await api('/api/account/email', { method: 'POST', body: { email } });
+      state.user.email = result.email;
+      resultEl.innerHTML = `<p class="muted" style="font-size:13px;">Saved.</p>`;
+    } catch (err) {
+      resultEl.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+    }
+  };
   api('/api/achievements').then(list => {
     const grid = document.getElementById('badge-grid');
     if (grid) renderBadgeGrid(grid, list); // guard: user may have navigated away before this resolves
@@ -1632,6 +1658,9 @@ function renderLogin() {
       <input type="text" id="username" required />
       <label for="password">Password</label>
       <input type="password" id="password" required minlength="6" />
+      <p id="forgot-password-row" style="margin:6px 0 0;font-size:13px;${referralCode ? 'display:none;' : ''}">
+        <button type="button" class="link-btn" id="forgot-password-btn">Forgot password?</button>
+      </p>
       <div class="error-text" id="auth-error" style="display:none;"></div>
       <button class="primary" type="submit" style="width:100%;margin-top:14px;">${referralCode ? 'Sign up (get 10,250 play dollars)' : 'Log in'}</button>
       <p style="margin-top:14px;font-size:13px;">
@@ -1655,6 +1684,7 @@ function renderLogin() {
   const submitBtn = document.querySelector('#auth-form button.primary');
   const errorEl = document.getElementById('auth-error');
   const walletBlock = document.getElementById('wallet-login-block');
+  const forgotPasswordRow = document.getElementById('forgot-password-row');
   const signupSubmitLabel = referralCode ? 'Sign up (get 10,250 play dollars)' : 'Sign up (get 10,000 play dollars)';
 
   switchBtn.onclick = () => {
@@ -1664,7 +1694,10 @@ function renderLogin() {
     switchText.textContent = mode === 'login' ? "Don't have an account?" : 'Already have an account?';
     switchBtn.textContent = mode === 'login' ? 'Sign up' : 'Log in';
     walletBlock.style.display = mode === 'login' ? 'block' : 'none';
+    forgotPasswordRow.style.display = mode === 'login' ? 'block' : 'none';
   };
+
+  document.getElementById('forgot-password-btn').onclick = () => navigate('#/forgot-password');
 
   async function applyLoginResult(result) {
     state.token = result.token;
@@ -1711,6 +1744,95 @@ function renderLogin() {
   };
 }
 
+// ---------- forgot / reset password ----------
+
+function renderForgotPassword() {
+  appEl.innerHTML = `
+    <form class="auth-form card" id="forgot-form">
+      <h1>Forgot password?</h1>
+      <p class="muted" style="margin-top:-8px;">Enter your username. If your account has an email on file, we'll send a reset link to it.</p>
+      <label for="forgot-username">Username</label>
+      <input type="text" id="forgot-username" required />
+      <div class="error-text" id="forgot-error" style="display:none;"></div>
+      <div class="muted" id="forgot-result" style="display:none;font-size:13px;margin-top:10px;"></div>
+      <button class="primary" type="submit" style="width:100%;margin-top:14px;">Send reset link</button>
+      <p style="margin-top:14px;font-size:13px;">
+        <a href="#/login">Back to log in</a>
+      </p>
+    </form>
+  `;
+  const form = document.getElementById('forgot-form');
+  const errorEl = document.getElementById('forgot-error');
+  const resultEl = document.getElementById('forgot-result');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    errorEl.style.display = 'none';
+    const username = document.getElementById('forgot-username').value.trim();
+    const submitBtn = form.querySelector('button.primary');
+    submitBtn.disabled = true;
+    try {
+      const result = await api('/api/forgot-password', { method: 'POST', auth: false, body: { username } });
+      // Deliberately the same message no matter what the server actually
+      // found (see the backend's own comment on this) — showing it as
+      // plain confirmation text, not an error, either way.
+      resultEl.textContent = result.detail;
+      resultEl.style.display = 'block';
+      form.querySelector('#forgot-username').disabled = true;
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = 'block';
+      submitBtn.disabled = false;
+    }
+  };
+}
+
+function renderResetPassword() {
+  const hashQuery = location.hash.split('?')[1] || '';
+  const token = new URLSearchParams(hashQuery).get('token') || '';
+  if (!token) {
+    appEl.innerHTML = `<div class="empty-state">This reset link is missing its token. <a href="#/forgot-password">Request a new one</a>.</div>`;
+    return;
+  }
+  appEl.innerHTML = `
+    <form class="auth-form card" id="reset-form">
+      <h1>Reset your password</h1>
+      <label for="reset-password">New password</label>
+      <input type="password" id="reset-password" required minlength="6" />
+      <label for="reset-password-confirm">Confirm new password</label>
+      <input type="password" id="reset-password-confirm" required minlength="6" />
+      <div class="error-text" id="reset-error" style="display:none;"></div>
+      <button class="primary" type="submit" style="width:100%;margin-top:14px;">Reset password</button>
+    </form>
+  `;
+  const form = document.getElementById('reset-form');
+  const errorEl = document.getElementById('reset-error');
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    errorEl.style.display = 'none';
+    const newPassword = document.getElementById('reset-password').value;
+    const confirm = document.getElementById('reset-password-confirm').value;
+    if (newPassword !== confirm) {
+      errorEl.textContent = "Passwords don't match";
+      errorEl.style.display = 'block';
+      return;
+    }
+    try {
+      await api('/api/reset-password', { method: 'POST', auth: false, body: { token, new_password: newPassword } });
+      // Any old session (this browser or anywhere else) was just
+      // invalidated server-side as part of the reset — clear whatever
+      // token this tab happens to be holding too, so the UI doesn't lie
+      // about being logged in, then send them to log in fresh.
+      state.token = null;
+      state.user = null;
+      localStorage.removeItem('pm_token');
+      appEl.innerHTML = `<div class="empty-state">Password reset — <a href="#/login">log in with your new password</a>.</div>`;
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.style.display = 'block';
+    }
+  };
+}
+
 // ---------- rules & FAQ ----------
 
 const FAQ_ITEMS = [
@@ -1733,6 +1855,10 @@ const FAQ_ITEMS = [
   {
     q: 'What are deposit fees?',
     a: `Deposits model a ${DEPOSIT_FEE_LABEL} fee on top of the amount you "deposit" — this is play money, so nothing is actually charged, but it mirrors the fee shape a real payment processor would take, so the economics are visible before any of this ever touches real funds.`,
+  },
+  {
+    q: 'I forgot my password — what now?',
+    a: 'Click "Forgot password?" on the login page and enter your username. If you\'ve added an email to your account from the Account page, we\'ll send a one-time reset link that expires in an hour. Haven\'t added an email yet? Add one from the Account page first — signup doesn\'t collect one by default, so there\'s nowhere to send a link until you do.',
   },
   {
     q: 'Can bots trade here?',
