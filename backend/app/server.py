@@ -6,7 +6,7 @@ from functools import wraps
 
 from flask import Flask, request, jsonify, g, send_from_directory
 
-from . import db, amm, scheduler, wallet_auth, email_feed
+from . import db, amm, scheduler, wallet_auth, email_feed, realmoney
 from .security import (
     hash_password, verify_password, new_token,
     generate_api_key, hash_api_key, API_KEY_PREFIX,
@@ -314,6 +314,23 @@ def _notify(conn, user_id, ntype, message, market_id=None):
     )
 
 
+# ---------- compliance audit log (see audit_log table in db.py) ----------
+#
+# Single insertion point for anything a regulator or a future incident
+# review would want a record of: KYC submitted/approved/rejected,
+# real-money deposit/withdrawal attempted, an admin acting on someone
+# else's account. user_id is who the event is about; actor_user_id is who
+# performed it (equal to user_id for a self-service action like submitting
+# your own KYC, the admin's id for an admin approving/rejecting someone
+# else's).
+
+def _audit(conn, user_id, actor_user_id, event_type, detail=None):
+    conn.execute(
+        "INSERT INTO audit_log (user_id, actor_user_id, event_type, detail) VALUES (?, ?, ?, ?)",
+        (user_id, actor_user_id, event_type, detail),
+    )
+
+
 @app.get("/api/notifications")
 @require_auth
 def notifications():
@@ -579,7 +596,20 @@ def me():
         "wallet_address": u["wallet_address"] if "wallet_address" in u.keys() else None,
         "email": u["email"] if "email" in u.keys() else None,
         "daily_streak": streak, "daily_bonus_claimable": claimable,
+        # Real-money mode is off everywhere by default (see realmoney.py) —
+        # these fields are harmless to always send; the frontend only acts
+        # on them when real_money_enabled is true.
+        "real_money_enabled": realmoney.REAL_MONEY_ENABLED,
+        "kyc_status": u["kyc_status"] if "kyc_status" in u.keys() else "unverified",
+        "real_balance": u["real_balance"] if "real_balance" in u.keys() else 0,
     })
+
+
+@app.get("/api/config")
+def public_config():
+    """Unauthenticated — the frontend calls this before login to know
+    whether to show any real-money copy/UI at all."""
+    return jsonify({"real_money_enabled": realmoney.REAL_MONEY_ENABLED})
 
 
 # ---------- account email (for password-reset-by-email) ----------
@@ -922,6 +952,276 @@ def deposits_summary():
         "fee_pct": DEPOSIT_FEE_PCT,
         "fee_flat": DEPOSIT_FEE_FLAT,
     })
+
+
+# ---------- real-money mode (see realmoney.py — off by default everywhere) ----------
+#
+# Everything below is scaffolding for turning real cash on *after*
+# licensing/registration is actually in place, not a live payment system.
+# realmoney.REAL_MONEY_ENABLED gates every endpoint here; it's false unless
+# UNICORN_REAL_MONEY_ENABLED is deliberately set in the environment, which
+# it isn't anywhere by default (see README's "Real-money mode" section).
+
+REAL_MONEY_DEPOSIT_MIN = 1.00
+REAL_MONEY_DEPOSIT_MAX = 10_000.00
+REAL_MONEY_WITHDRAW_MIN = 1.00
+
+
+def _require_real_money_enabled():
+    if not realmoney.REAL_MONEY_ENABLED:
+        return jsonify({
+            "detail": "Real-money mode isn't enabled on this deploy yet. "
+                       "It goes live only after licensing/registration is in place — "
+                       "see README's \"Real-money mode\" section.",
+        }), 404
+    return None
+
+
+def _latest_kyc_state(conn, user_id):
+    """Returns the most recent kyc_verifications row for a user, or None if
+    they've never submitted one."""
+    return conn.execute(
+        "SELECT * FROM kyc_verifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+        (user_id,),
+    ).fetchone()
+
+
+@app.post("/api/kyc/submit")
+@require_session_auth  # identity-sensitive, same reasoning as account/email — not for API keys
+@rate_limit(5, 60)
+def submit_kyc():
+    blocked = _require_real_money_enabled()
+    if blocked:
+        return blocked
+
+    data = request.get_json(force=True, silent=True) or {}
+    legal_name = (data.get("legal_name") or "").strip()
+    date_of_birth = (data.get("date_of_birth") or "").strip()
+    address = (data.get("address") or "").strip()
+    state = (data.get("state") or "").strip().upper()
+
+    if not legal_name or not date_of_birth or not address or not state:
+        return jsonify({"detail": "legal_name, date_of_birth, address, and state are all required"}), 400
+    if len(state) != 2:
+        return jsonify({"detail": "state must be a two-letter code, e.g. ND"}), 400
+    if realmoney.state_is_blocked(state):
+        return jsonify({
+            "detail": f"Real-money trading isn't available in {state} yet.",
+        }), 403
+
+    result = realmoney.kyc_provider.submit(g.user["id"], legal_name, date_of_birth, address, state)
+
+    conn = db.get_db()
+    conn.execute(
+        "INSERT INTO kyc_verifications "
+        "(user_id, legal_name, date_of_birth, address, state, status, provider, provider_reference) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (g.user["id"], legal_name, date_of_birth, address, state,
+         result["status"], result["provider"], result.get("provider_reference")),
+    )
+    conn.execute("UPDATE users SET kyc_status = ? WHERE id = ?", (result["status"], g.user["id"]))
+    _audit(conn, g.user["id"], g.user["id"], "kyc_submitted", f"provider={result['provider']} state={state}")
+    conn.commit()
+    return jsonify({"status": result["status"], "provider": result["provider"]})
+
+
+@app.get("/api/kyc/status")
+@require_auth
+def kyc_status():
+    conn = db.get_db()
+    latest = _latest_kyc_state(conn, g.user["id"])
+    return jsonify({
+        "kyc_status": g.user["kyc_status"] if "kyc_status" in g.user.keys() else "unverified",
+        "latest_submission": None if latest is None else {
+            "status": latest["status"],
+            "state": latest["state"],
+            "provider": latest["provider"],
+            "created_at": latest["created_at"],
+            "reviewed_at": latest["reviewed_at"],
+            "rejection_reason": latest["rejection_reason"],
+        },
+    })
+
+
+@app.get("/api/admin/kyc")
+@require_admin
+def admin_kyc_queue():
+    """?status=pending (default) | verified | rejected | all"""
+    status = (request.args.get("status") or "pending").strip().lower()
+    conn = db.get_db()
+    if status == "all":
+        rows = conn.execute(
+            "SELECT kyc_verifications.*, users.username FROM kyc_verifications "
+            "JOIN users ON users.id = kyc_verifications.user_id "
+            "ORDER BY kyc_verifications.created_at DESC LIMIT 200"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT kyc_verifications.*, users.username FROM kyc_verifications "
+            "JOIN users ON users.id = kyc_verifications.user_id "
+            "WHERE kyc_verifications.status = ? ORDER BY kyc_verifications.created_at ASC LIMIT 200",
+            (status,),
+        ).fetchall()
+    return jsonify({"submissions": [
+        {
+            "id": r["id"], "user_id": r["user_id"], "username": r["username"],
+            "legal_name": r["legal_name"], "date_of_birth": r["date_of_birth"],
+            "address": r["address"], "state": r["state"], "status": r["status"],
+            "provider": r["provider"], "created_at": r["created_at"],
+            "reviewed_at": r["reviewed_at"], "rejection_reason": r["rejection_reason"],
+        }
+        for r in rows
+    ]})
+
+
+@app.post("/api/admin/kyc/<int:submission_id>/approve")
+@require_admin
+def admin_kyc_approve(submission_id):
+    conn = db.get_db()
+    row = conn.execute("SELECT * FROM kyc_verifications WHERE id = ?", (submission_id,)).fetchone()
+    if row is None:
+        return jsonify({"detail": "Not found"}), 404
+    conn.execute(
+        "UPDATE kyc_verifications SET status = 'verified', reviewed_by_user_id = ?, reviewed_at = ? WHERE id = ?",
+        (g.user["id"], now_iso(), submission_id),
+    )
+    conn.execute("UPDATE users SET kyc_status = 'verified' WHERE id = ?", (row["user_id"],))
+    _notify(conn, row["user_id"], "kyc", "Your identity verification was approved — real-money features are now unlocked.")
+    _audit(conn, row["user_id"], g.user["id"], "kyc_approved", f"submission_id={submission_id}")
+    conn.commit()
+    return jsonify({"status": "verified"})
+
+
+@app.post("/api/admin/kyc/<int:submission_id>/reject")
+@require_admin
+def admin_kyc_reject(submission_id):
+    data = request.get_json(force=True, silent=True) or {}
+    reason = (data.get("reason") or "").strip() or "No reason given"
+    conn = db.get_db()
+    row = conn.execute("SELECT * FROM kyc_verifications WHERE id = ?", (submission_id,)).fetchone()
+    if row is None:
+        return jsonify({"detail": "Not found"}), 404
+    conn.execute(
+        "UPDATE kyc_verifications SET status = 'rejected', reviewed_by_user_id = ?, reviewed_at = ?, "
+        "rejection_reason = ? WHERE id = ?",
+        (g.user["id"], now_iso(), reason, submission_id),
+    )
+    conn.execute("UPDATE users SET kyc_status = 'rejected' WHERE id = ?", (row["user_id"],))
+    _notify(conn, row["user_id"], "kyc", f"Your identity verification wasn't approved: {reason}")
+    _audit(conn, row["user_id"], g.user["id"], "kyc_rejected", f"submission_id={submission_id} reason={reason}")
+    conn.commit()
+    return jsonify({"status": "rejected"})
+
+
+def _require_kyc_verified(conn):
+    latest = _latest_kyc_state(conn, g.user["id"])
+    current_status = g.user["kyc_status"] if "kyc_status" in g.user.keys() else "unverified"
+    if current_status != "verified":
+        return jsonify({"detail": "Identity verification is required before real-money deposits or withdrawals."}), 403
+    if latest is not None and realmoney.state_is_blocked(latest["state"]):
+        return jsonify({"detail": f"Real-money trading isn't available in {latest['state']} yet."}), 403
+    return None
+
+
+@app.post("/api/real-money/deposit")
+@require_session_auth
+@rate_limit(10, 60)
+def real_money_deposit():
+    blocked = _require_real_money_enabled()
+    if blocked:
+        return blocked
+
+    conn = db.get_db()
+    kyc_blocked = _require_kyc_verified(conn)
+    if kyc_blocked:
+        return kyc_blocked
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        amount = round(float(data.get("amount")), 2)
+    except (TypeError, ValueError):
+        return jsonify({"detail": "amount must be a number"}), 400
+    if amount < REAL_MONEY_DEPOSIT_MIN or amount > REAL_MONEY_DEPOSIT_MAX:
+        return jsonify({
+            "detail": f"amount must be between ${REAL_MONEY_DEPOSIT_MIN:.2f} and ${REAL_MONEY_DEPOSIT_MAX:,.2f}",
+        }), 400
+
+    try:
+        result = realmoney.payments_provider.create_deposit(g.user["id"], amount)
+    except realmoney.PaymentsNotConfiguredError as e:
+        return jsonify({"detail": str(e)}), 503
+
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    new_balance = round(user["real_balance"] + amount, 2) if result["status"] == "completed" else user["real_balance"]
+    if result["status"] == "completed":
+        conn.execute("UPDATE users SET real_balance = ? WHERE id = ?", (new_balance, user["id"]))
+    conn.execute(
+        "INSERT INTO real_money_transactions "
+        "(user_id, type, amount, status, provider, provider_reference, real_balance_after, completed_at) "
+        "VALUES (?, 'deposit', ?, ?, ?, ?, ?, ?)",
+        (user["id"], amount, result["status"], result["provider"], result.get("provider_reference"),
+         new_balance, now_iso() if result["status"] == "completed" else None),
+    )
+    _audit(conn, user["id"], user["id"], "real_money_deposit", f"amount={amount} status={result['status']}")
+    conn.commit()
+    return jsonify({"status": result["status"], "real_balance": new_balance, "amount": amount})
+
+
+@app.post("/api/real-money/withdraw")
+@require_session_auth
+@rate_limit(10, 60)
+def real_money_withdraw():
+    blocked = _require_real_money_enabled()
+    if blocked:
+        return blocked
+
+    conn = db.get_db()
+    kyc_blocked = _require_kyc_verified(conn)
+    if kyc_blocked:
+        return kyc_blocked
+
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        amount = round(float(data.get("amount")), 2)
+    except (TypeError, ValueError):
+        return jsonify({"detail": "amount must be a number"}), 400
+    if amount < REAL_MONEY_WITHDRAW_MIN:
+        return jsonify({"detail": f"amount must be at least ${REAL_MONEY_WITHDRAW_MIN:.2f}"}), 400
+
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    if amount > user["real_balance"]:
+        return jsonify({"detail": "Insufficient real-money balance"}), 400
+
+    try:
+        result = realmoney.payments_provider.create_withdrawal(g.user["id"], amount)
+    except realmoney.PaymentsNotConfiguredError as e:
+        return jsonify({"detail": str(e)}), 503
+
+    new_balance = round(user["real_balance"] - amount, 2) if result["status"] == "completed" else user["real_balance"]
+    if result["status"] == "completed":
+        conn.execute("UPDATE users SET real_balance = ? WHERE id = ?", (new_balance, user["id"]))
+    conn.execute(
+        "INSERT INTO real_money_transactions "
+        "(user_id, type, amount, status, provider, provider_reference, real_balance_after, completed_at) "
+        "VALUES (?, 'withdrawal', ?, ?, ?, ?, ?, ?)",
+        (user["id"], amount, result["status"], result["provider"], result.get("provider_reference"),
+         new_balance, now_iso() if result["status"] == "completed" else None),
+    )
+    _audit(conn, user["id"], user["id"], "real_money_withdrawal", f"amount={amount} status={result['status']}")
+    conn.commit()
+    return jsonify({"status": result["status"], "real_balance": new_balance, "amount": amount})
+
+
+@app.get("/api/real-money/transactions")
+@require_auth
+def real_money_transactions():
+    conn = db.get_db()
+    rows = conn.execute(
+        "SELECT type, amount, status, provider, real_balance_after, created_at, completed_at "
+        "FROM real_money_transactions WHERE user_id = ? ORDER BY created_at DESC LIMIT 200",
+        (g.user["id"],),
+    ).fetchall()
+    return jsonify({"transactions": [dict(r) for r in rows]})
 
 
 # ---------- market routes ----------

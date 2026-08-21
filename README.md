@@ -132,6 +132,11 @@ meant to be reachable by anyone else. To put UNICORN on a real URL:
      Defaults to the incoming request's own URL, which is normally
      correct; set this explicitly if you're behind a proxy that URL
      doesn't reflect accurately.
+   - `UNICORN_REAL_MONEY_ENABLED` — **leave unset.** Turns on the
+     real-money scaffolding described in "Real-money mode" below. Nothing
+     in this app should ever set this true until the actual legal/
+     financial infrastructure in "Before this can take real money" exists
+     — the app doesn't and can't verify that on its own.
 5. **Deploy, then generate a domain** (Settings → Networking → Generate
    Domain). Railway assigns a `*.up.railway.app` URL — that's your live
    site.
@@ -377,6 +382,76 @@ including on another device — since a password reset is exactly the
 moment a leaked-password scenario would otherwise let a stale session
 token keep working right past the change.
 
+## Real-money mode (scaffolding, off by default)
+
+UNICORN is play-money only today — every account gets `db.STARTING_BALANCE`
+in fake currency at signup, and there is no code path anywhere that moves
+real cash. `backend/app/realmoney.py` and a handful of endpoints in
+`server.py` exist as the *seam* for turning real money on later, once the
+actual registration in "Before this can take real money" (below) is in
+place — not as a working payment system today. Nothing here should be
+switched on in a deploy real strangers can reach until that licensing work
+is done.
+
+**The master switch:** `UNICORN_REAL_MONEY_ENABLED` (unset/false
+everywhere by default). While false, every real-money endpoint returns a
+clean 404 and the frontend never shows any real-money UI at all — the app
+behaves exactly as it always has. Flipping it true unlocks the scaffolding
+below; it does **not** by itself let anyone move real cash — see the
+payments provider note further down.
+
+**What's actually there:**
+
+- **KYC (identity verification)** — `POST /api/kyc/submit` collects legal
+  name, date of birth, address, and state, and records it in the new
+  `kyc_verifications` table. No real identity-verification vendor is
+  connected — `realmoney.ManualKYCProvider` just leaves every submission
+  `pending` for a human to review from the new admin **Real-money KYC
+  queue** card (`GET /api/admin/kyc`, approve/reject endpoints). Manual
+  review is a placeholder for building and testing this flow, not a
+  substitute for real KYC/AML checks at any real scale — swap in a real
+  vendor (Persona, Onfido, Stripe Identity, etc.) by writing one class that
+  implements `realmoney.KYCProvider` and pointing `kyc_provider` at it;
+  nothing else in the app needs to change.
+- **Geofencing** — `UNICORN_REAL_MONEY_BLOCKED_STATES` (comma-separated
+  two-letter codes, e.g. `NJ,NY,MA,NV`) blocks KYC submission and
+  deposits/withdrawals from those states. Empty by default. Only ever set
+  this to a real list handed down by counsel — see the "live legal fight"
+  section of `UNICORN_Licensing_Punch_List` for why sports contracts
+  specifically carry state-by-state exposure.
+- **Deposits/withdrawals** — `POST /api/real-money/deposit` and
+  `/api/real-money/withdraw`, gated on `UNICORN_REAL_MONEY_ENABLED` and on
+  the caller's `kyc_status` being `verified`. No real payment processor is
+  connected — `realmoney.StubPaymentsProvider` refuses to do anything at
+  all (a clean 503, not a fake success) unless a *second*,
+  separately-named flag, `UNICORN_ALLOW_STUB_PAYMENTS`, is also set —
+  purely so the endpoints/ledger/frontend can be exercised end-to-end in
+  testing without a real processor account, and so a stub can never be
+  mistaken for a real integration or left on by accident in production.
+  Swap in a real processor (Stripe, an ACH/banking partner, etc.) by
+  writing one class that implements `realmoney.PaymentsProvider` and
+  pointing `payments_provider` at it.
+- **A separate real-dollar balance** — `users.real_balance`, deliberately
+  never touched by any play-money code path (daily bonus, referral bonus,
+  demo deposit, trading all still only ever touch `balance`). Every
+  deposit/withdrawal is also logged to `real_money_transactions` — a
+  dedicated ledger, separate from the play-money `transactions` table —
+  and to the new generic `audit_log` table alongside every KYC event, for
+  the "who did what, when" record-keeping a real deployment needs.
+- **Account page** — when `real_money_enabled` is true, shows a "Real-money
+  mode" card: the KYC form (or pending/rejected status) before
+  verification, real balance + deposit/withdraw forms + transaction
+  history after.
+
+**What this is *not*:** a payment integration, a KYC/AML program, or
+anything that makes taking real money legal on its own. It's the
+application-layer plumbing so that once a real KYC vendor, a real payment
+processor, a custody/banking partner, and actual CFTC/state registration
+are all in place, wiring them in is "write one class per interface," not
+"redesign the app." See "Before this can take real money" below for the
+full list of what's still needed, and `UNICORN_Licensing_Punch_List` for
+the regulatory path itself.
+
 ## How the pricing works
 
 Each market has a liquidity parameter `b`. Buying shares of an outcome
@@ -419,9 +494,12 @@ connecting real money, at minimum you'd need:
   can't corrupt a real-money payout.
 - **Legal counsel** — genuinely, before launch, not after.
 
-None of that is implemented here, on purpose. Treat this as the product/UX
-layer to build once the legal and financial infrastructure underneath it
-actually exists.
+None of the *legal or financial infrastructure* above is implemented here,
+on purpose — real KYC/AML, a real payment processor, custody, and the
+registration itself all still have to come from outside this codebase. What
+*is* built is the application-layer seam that infrastructure plugs into —
+see "Real-money mode" above — so that once those pieces exist, wiring them
+in doesn't mean redesigning the app from scratch.
 
 ## Known limitations of the demo
 
@@ -446,3 +524,10 @@ actually exists.
 - `python3 run.py` (Flask's built-in dev server) is for local use only.
   The Procfile runs gunicorn instead for a real deploy — see "Deploying to
   Railway" above.
+- **Real-money mode is scaffolding, not a working payment system** — see
+  "Real-money mode" above. `UNICORN_REAL_MONEY_ENABLED` is unset by default
+  everywhere, KYC review is manual (no real identity-verification vendor
+  connected), and no real payment processor is connected either (deposits/
+  withdrawals fail with a clear "not configured" error unless a
+  testing-only stub flag is also set). Tested end-to-end locally with the
+  stub provider; never exercised against a real vendor.

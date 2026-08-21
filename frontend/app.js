@@ -1362,6 +1362,50 @@ function renderChallengeGrid(container, challengeList) {
   `).join('');
 }
 
+// Real-money mode is off on every deploy until UNICORN_REAL_MONEY_ENABLED
+// is set (see backend/app/realmoney.py) — state.user.real_money_enabled
+// comes straight from /api/me, so this whole card just doesn't render at
+// all on a demo deploy. Three branches: not yet verified (or a past
+// rejection) shows the KYC form; pending shows a holding message; verified
+// unlocks the real balance + deposit/withdraw forms.
+function realMoneySectionHtml(status) {
+  if (status === 'verified') {
+    return `
+      <p class="muted">Real balance: <strong>${fmtMoney(state.user.real_balance || 0)}</strong></p>
+      <form id="real-deposit-form" class="inline-form">
+        <input id="real-deposit-amount" type="number" min="1" max="10000" step="0.01" placeholder="Amount ($)" required>
+        <button type="submit" class="btn primary">Deposit</button>
+      </form>
+      <div id="real-deposit-result"></div>
+      <form id="real-withdraw-form" class="inline-form" style="margin-top:10px;">
+        <input id="real-withdraw-amount" type="number" min="1" step="0.01" placeholder="Amount ($)" required>
+        <button type="submit" class="btn">Withdraw</button>
+      </form>
+      <div id="real-withdraw-result"></div>
+      <div id="real-money-history" class="muted" style="font-size:13px;margin-top:10px;">Loading transaction history…</div>
+    `;
+  }
+  if (status === 'pending') {
+    return `<p class="muted">Your identity verification is under review — check back soon.</p>`;
+  }
+  return `
+    ${status === 'rejected' ? `<p class="error-text" id="kyc-rejection-reason">Your last submission wasn't approved.</p>` : ''}
+    <p class="muted">Verify your identity to unlock real-money deposits and withdrawals once this deploy's licensing is in place.</p>
+    <form id="kyc-form">
+      <label for="kyc-legal-name">Legal name</label>
+      <input type="text" id="kyc-legal-name" required />
+      <label for="kyc-dob">Date of birth</label>
+      <input type="date" id="kyc-dob" required />
+      <label for="kyc-address">Address</label>
+      <input type="text" id="kyc-address" required />
+      <label for="kyc-state">State (2-letter)</label>
+      <input type="text" id="kyc-state" maxlength="2" style="text-transform:uppercase;" required />
+      <div class="error-text" id="kyc-error" style="display:none;"></div>
+      <button class="primary" type="submit" style="margin-top:12px;">Submit for review</button>
+    </form>
+  `;
+}
+
 async function renderAccount() {
   appEl.innerHTML = `
     <h1>Account</h1>
@@ -1392,6 +1436,12 @@ async function renderAccount() {
       </form>
       <div id="deposit-result"></div>
     </div>
+    ${state.user.real_money_enabled ? `
+    <div class="card">
+      <h2>Real-money mode</h2>
+      ${realMoneySectionHtml(state.user.kyc_status || 'unverified')}
+    </div>
+    ` : ''}
     <div class="card">
       <h2>Wallet</h2>
       <p class="muted">Link a wallet to sign in with it instead of your password. Linking only proves you control the address — it never moves any real crypto, and your balance stays UNICORN's own play money either way.</p>
@@ -1425,6 +1475,88 @@ async function renderAccount() {
     }
   };
   renderWalletStatus();
+  if (state.user.real_money_enabled) {
+    const kycStatus = state.user.kyc_status || 'unverified';
+    if (kycStatus === 'verified') {
+      document.getElementById('real-deposit-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const resultEl = document.getElementById('real-deposit-result');
+        const amount = parseFloat(document.getElementById('real-deposit-amount').value);
+        try {
+          const result = await api('/api/real-money/deposit', { method: 'POST', body: { amount } });
+          state.user.real_balance = result.real_balance;
+          resultEl.innerHTML = result.status === 'completed'
+            ? `<p class="muted" style="font-size:13px;">Deposited. New real balance: <strong>${fmtMoney(result.real_balance)}</strong>.</p>`
+            : `<p class="muted" style="font-size:13px;">Deposit ${escapeHtml(result.status)}.</p>`;
+          document.getElementById('real-deposit-amount').value = '';
+        } catch (err) {
+          resultEl.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+        }
+      };
+      document.getElementById('real-withdraw-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const resultEl = document.getElementById('real-withdraw-result');
+        const amount = parseFloat(document.getElementById('real-withdraw-amount').value);
+        try {
+          const result = await api('/api/real-money/withdraw', { method: 'POST', body: { amount } });
+          state.user.real_balance = result.real_balance;
+          resultEl.innerHTML = result.status === 'completed'
+            ? `<p class="muted" style="font-size:13px;">Withdrawal sent. New real balance: <strong>${fmtMoney(result.real_balance)}</strong>.</p>`
+            : `<p class="muted" style="font-size:13px;">Withdrawal ${escapeHtml(result.status)}.</p>`;
+          document.getElementById('real-withdraw-amount').value = '';
+        } catch (err) {
+          resultEl.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+        }
+      };
+      api('/api/real-money/transactions').then(r => {
+        const el = document.getElementById('real-money-history');
+        if (!el) return; // guard: user may have navigated away before this resolves
+        if (!r.transactions.length) {
+          el.textContent = 'No real-money transactions yet.';
+          return;
+        }
+        el.innerHTML = r.transactions.map(t =>
+          `${escapeHtml(t.type)} · ${fmtMoney(t.amount)} · ${escapeHtml(t.status)} · ${escapeHtml(t.created_at)}`
+        ).join('<br>');
+      }).catch(() => {
+        const el = document.getElementById('real-money-history');
+        if (el) el.textContent = "Couldn't load transaction history right now.";
+      });
+    } else {
+      const kycForm = document.getElementById('kyc-form');
+      if (kycForm) {
+        kycForm.onsubmit = async (e) => {
+          e.preventDefault();
+          const errorEl = document.getElementById('kyc-error');
+          errorEl.style.display = 'none';
+          try {
+            const result = await api('/api/kyc/submit', {
+              method: 'POST',
+              body: {
+                legal_name: document.getElementById('kyc-legal-name').value.trim(),
+                date_of_birth: document.getElementById('kyc-dob').value,
+                address: document.getElementById('kyc-address').value.trim(),
+                state: document.getElementById('kyc-state').value.trim().toUpperCase(),
+              },
+            });
+            state.user.kyc_status = result.status;
+            renderAccount();
+          } catch (err) {
+            errorEl.textContent = err.message;
+            errorEl.style.display = 'block';
+          }
+        };
+      }
+      if (kycStatus === 'rejected') {
+        api('/api/kyc/status').then(r => {
+          const el = document.getElementById('kyc-rejection-reason');
+          if (el && r.latest_submission && r.latest_submission.rejection_reason) {
+            el.textContent = `Your last submission wasn't approved: ${r.latest_submission.rejection_reason}`;
+          }
+        }).catch(() => {});
+      }
+    }
+  }
   document.getElementById('email-form').onsubmit = async (e) => {
     e.preventDefault();
     const resultEl = document.getElementById('email-result');
@@ -1529,9 +1661,61 @@ function renderWalletStatus() {
 
 // ---------- admin ----------
 
+async function loadKycQueue() {
+  const el = document.getElementById('kyc-queue');
+  if (!el) return; // guard: admin may have navigated away before this resolves
+  try {
+    const { submissions } = await api('/api/admin/kyc?status=pending');
+    if (!submissions.length) {
+      el.innerHTML = `<p class="muted">No pending KYC submissions.</p>`;
+      return;
+    }
+    el.innerHTML = submissions.map(s => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--gridline);">
+        <div><strong>${escapeHtml(s.username)}</strong> — ${escapeHtml(s.legal_name)} · ${escapeHtml(s.state)} · DOB ${escapeHtml(s.date_of_birth)}</div>
+        <div class="muted" style="font-size:13px;">${escapeHtml(s.address)}</div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button data-id="${s.id}" class="kyc-approve-btn">Approve</button>
+          <button data-id="${s.id}" class="kyc-reject-btn danger">Reject</button>
+        </div>
+      </div>
+    `).join('');
+    el.querySelectorAll('.kyc-approve-btn').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Approve this KYC submission? This unlocks real-money deposits/withdrawals for this account.')) return;
+        try {
+          await api(`/api/admin/kyc/${btn.dataset.id}/approve`, { method: 'POST' });
+          loadKycQueue();
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+    });
+    el.querySelectorAll('.kyc-reject-btn').forEach(btn => {
+      btn.onclick = async () => {
+        const reason = prompt('Reason for rejecting this submission?') || '';
+        try {
+          await api(`/api/admin/kyc/${btn.dataset.id}/reject`, { method: 'POST', body: { reason } });
+          loadKycQueue();
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+    });
+  } catch (e) {
+    el.innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+  }
+}
+
 async function renderAdmin() {
   appEl.innerHTML = `
     <h1>Admin</h1>
+    ${state.user.real_money_enabled ? `
+    <div class="card">
+      <h2>Real-money KYC queue</h2>
+      <div id="kyc-queue">Loading…</div>
+    </div>
+    ` : ''}
     <div class="card">
       <h2>Deposit fee revenue (play money — models the mechanic, not real revenue)</h2>
       <div id="deposits-summary">Loading…</div>
@@ -1585,6 +1769,10 @@ async function renderAdmin() {
   }).catch((e) => {
     document.getElementById('deposits-summary').innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
   });
+
+  if (state.user.real_money_enabled) {
+    loadKycQueue();
+  }
 
   document.getElementById('create-market-form').onsubmit = async (e) => {
     e.preventDefault();

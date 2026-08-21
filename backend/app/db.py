@@ -166,6 +166,66 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
     used_at TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+-- Real-money mode scaffolding (see backend/app/realmoney.py and README's
+-- "Real-money mode" section). Inert today — nothing writes to these tables
+-- unless UNICORN_REAL_MONEY_ENABLED is set, which it isn't anywhere by
+-- default. One row per identity-verification attempt; a user can have more
+-- than one if a rejection is followed by a resubmission, so this is a log,
+-- not a single mutable field on users (kyc_status below is the derived
+-- "current" state for fast checks).
+CREATE TABLE IF NOT EXISTS kyc_verifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    legal_name TEXT NOT NULL,
+    date_of_birth TEXT NOT NULL,
+    address TEXT NOT NULL,
+    state TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    provider TEXT NOT NULL DEFAULT 'manual',
+    provider_reference TEXT,
+    reviewed_by_user_id INTEGER,
+    rejection_reason TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    reviewed_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id)
+);
+
+-- One row per real-money deposit/withdrawal attempt, separate from the
+-- play-money `transactions` table on purpose — real cash needs its own
+-- auditable trail (provider + provider_reference + status transitions)
+-- that shouldn't be mixed in with daily-bonus and trade rows.
+CREATE TABLE IF NOT EXISTS real_money_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    amount REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    provider TEXT NOT NULL,
+    provider_reference TEXT,
+    real_balance_after REAL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+-- Generic compliance/audit trail — one row per event worth being able to
+-- answer "who did what, when" about later (KYC submitted/approved/rejected,
+-- real-money deposit/withdrawal attempted, admin actions on someone else's
+-- account). Deliberately as flat as `notifications` (see that table's
+-- comment above) for the same reason: one INSERT per event, no schema
+-- change needed for a new event type.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    actor_user_id INTEGER,
+    event_type TEXT NOT NULL,
+    detail TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (actor_user_id) REFERENCES users(id)
+);
 """
 
 
@@ -244,6 +304,19 @@ USER_COLUMN_MIGRATIONS = [
     # an error state. See POST /api/account/email and POST
     # /api/forgot-password in server.py.
     ("email", "TEXT"),
+    # Derived "current" KYC state, kept in sync with the latest row in
+    # kyc_verifications so every check that needs it (gating real-money
+    # deposit/withdrawal, the account page) is a single indexed column read
+    # instead of a subquery. The kyc_verifications table remains the source
+    # of truth / audit trail; this is a cache of its latest status.
+    ("kyc_status", "TEXT NOT NULL DEFAULT 'unverified'"),
+    # Real-dollar balance, entirely separate from the existing play-money
+    # `balance` column — deliberately never touched by any play-money code
+    # path (daily bonus, referral bonus, demo deposit, trading) so the two
+    # can never bleed into each other. Stays 0 for every account unless and
+    # until real-money mode is enabled and a real deposit clears. See
+    # realmoney.py and the real-money endpoints in server.py.
+    ("real_balance", "REAL NOT NULL DEFAULT 0"),
 ]
 
 TRANSACTION_COLUMN_MIGRATIONS = [
@@ -367,6 +440,20 @@ def _migrate(conn):
         "CREATE INDEX IF NOT EXISTS idx_notifications_user_unread "
         "ON notifications(user_id, is_read) WHERE is_read = 0"
     )
+
+    # Admin KYC queue (GET /api/admin/kyc) filters by status; a user's own
+    # KYC history (GET /api/kyc/status) filters by user_id.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kyc_status ON kyc_verifications(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_kyc_user ON kyc_verifications(user_id, created_at)")
+
+    # A user's real-money transaction history (GET /api/real-money/transactions)
+    # filters and sorts by (user_id, created_at).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_real_money_txn_user "
+        "ON real_money_transactions(user_id, created_at)"
+    )
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id, created_at)")
 
     conn.commit()
 
