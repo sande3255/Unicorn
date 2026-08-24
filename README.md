@@ -419,27 +419,44 @@ payments provider note further down.
   this to a real list handed down by counsel — see the "live legal fight"
   section of `UNICORN_Licensing_Punch_List` for why sports contracts
   specifically carry state-by-state exposure.
-- **Deposits/withdrawals** — `POST /api/real-money/deposit` and
-  `/api/real-money/withdraw`, gated on `UNICORN_REAL_MONEY_ENABLED` and on
-  the caller's `kyc_status` being `verified`. Two processor options exist
-  side by side in `realmoney.py`:
-  - `StubPaymentsProvider` — refuses to do anything at all (a clean 503,
-    not a fake success) unless `UNICORN_ALLOW_STUB_PAYMENTS` is also set,
-    purely so the endpoints/ledger/frontend can be exercised end-to-end in
-    testing without a real processor account.
-  - `BraintreePaymentsProvider` — a real integration, used automatically
-    the moment `BRAINTREE_MERCHANT_ID` is set (see "Payment processor
-    setup" below). **Deposits** go through Braintree's Drop-in UI (cards,
-    Apple Pay, Venmo, and PayPal, all in one widget, once each is enabled
-    on the Braintree control panel). **Withdrawals** go out through a
+- **Deposits/withdrawals** — `POST /api/real-money/deposit` (Braintree) and
+  the Stripe-specific pair below, plus `/api/real-money/withdraw`, all
+  gated on `UNICORN_REAL_MONEY_ENABLED` and on the caller's `kyc_status`
+  being `verified`. `realmoney.deposit_providers` is a dict, not a single
+  provider — Braintree and Stripe can both be configured **at the same
+  time**, and the account page shows a tab per one that's actually
+  configured (`GET /api/real-money/payment-config` tells the frontend
+  which). They're not redundant: Stripe's payment-methods list (checked
+  directly against Stripe's docs) covers cards, Apple Pay, Google Pay, and
+  Link, but not Venmo — Braintree is the one with native Venmo support, so
+  both stay in the app rather than one replacing the other.
+  - `StubPaymentsProvider` — used only when *neither* real processor is
+    configured. Refuses to do anything at all (a clean 503, not a fake
+    success) unless `UNICORN_ALLOW_STUB_PAYMENTS` is also set, purely so
+    the endpoints/ledger/frontend can be exercised end-to-end in testing.
+  - `BraintreePaymentsProvider` — active the moment `BRAINTREE_MERCHANT_ID`
+    is set (see "Payment processor setup" below). **Deposits** go through
+    Braintree's Drop-in UI (cards, Apple Pay, Venmo, and PayPal, all in one
+    widget, once each is enabled on the Braintree control panel).
+  - `StripePaymentsProvider` — active the moment `STRIPE_SECRET_KEY` is
+    set. **Deposits** go through Stripe's Payment Element (cards, Apple
+    Pay, Google Pay, Link) using Stripe's "deferred" flow: the frontend
+    asks the backend for a PaymentIntent, collects payment details and
+    confirms client-side with Stripe.js (that's also where any 3D
+    Secure/SCA challenge happens), then the backend re-verifies the
+    PaymentIntent's status directly with Stripe before crediting
+    `real_balance` — it never trusts the client's word alone.
+  - **Withdrawals**, from either deposit method, go out through a
     *separate* product, PayPal Payouts, to a PayPal or Venmo account
-    identified by email — Braintree itself has no API to send money to a
-    customer, and pushing straight back to a card would need Visa
-    Direct/Mastercard Send, which needs its own underwriting approval and
-    isn't wired in here.
-  Swap in a different processor entirely by writing one more class that
-  implements `realmoney.PaymentsProvider` and pointing `payments_provider`
-  at it — nothing else in the app needs to change.
+    identified by email (`realmoney.PayPalPayoutsClient`, shared by both
+    providers) — neither Braintree nor Stripe has an API to send money to
+    a customer in the mode used here, and pushing straight back to a card
+    would need Visa Direct/Mastercard Send (Braintree) or a full Stripe
+    Connect onboarding per recipient (Stripe), neither of which is wired
+    in.
+  Add a third processor by writing one more class that implements
+  `realmoney.PaymentsProvider` and adding it to `_build_deposit_providers()`
+  — nothing else in the app needs to change.
 - **A separate real-dollar balance** — `users.real_balance`, deliberately
   never touched by any play-money code path (daily bonus, referral bonus,
   demo deposit, trading all still only ever touch `balance`). Every
@@ -460,7 +477,11 @@ See "Before this can take real money" below for the full list of what's
 still needed, and `UNICORN_Licensing_Punch_List` for the regulatory path
 itself.
 
-### Payment processor setup (Braintree + PayPal Payouts)
+### Payment processor setup (Braintree + Stripe + PayPal Payouts)
+
+Braintree and Stripe are independent of each other — set up either one
+alone and that's the only deposit tab that shows up, or set up both for
+the full card/Apple Pay/Venmo/PayPal/Google Pay/Link spread.
 
 **1. Braintree account (deposits — cards, Apple Pay, Venmo, PayPal).**
 Sign up at braintreepayments.com (it's a PayPal company; a PayPal Business
@@ -481,20 +502,42 @@ account can link to it). From the Braintree control panel:
   `BRAINTREE_PRIVATE_KEY`, `BRAINTREE_ENVIRONMENT` (`sandbox` or
   `production`).
 
-**2. PayPal Payouts (withdrawals — PayPal/Venmo only, not cards).**
-PayPal Payouts is a separate product from Braintree with its own
+**2. Stripe account (deposits — cards, Apple Pay, Google Pay, Link).**
+Sign up at stripe.com (a separate account from Braintree/PayPal — these
+are two unrelated companies). From the Stripe Dashboard:
+
+- Grab the test-mode API keys first (Developers → API keys) — a Secret key
+  (`sk_test_...`) and a Publishable key (`pk_test_...`).
+- Apple Pay and Google Pay are enabled by default under Stripe's
+  "automatic payment methods" once the domain is registered — for Apple
+  Pay specifically, add your domain under Settings → Payment methods →
+  Apple Pay (a lighter-weight process than Braintree's, no separate
+  certificate upload). Google Pay needs no extra setup for a standard web
+  integration. Link (Stripe's own saved-payment-method wallet) is on by
+  default.
+- Set these on the deploy: `STRIPE_SECRET_KEY`, `STRIPE_PUBLISHABLE_KEY`.
+  Switching from test keys (`sk_test_`/`pk_test_`) to live keys
+  (`sk_live_`/`pk_live_`) is what actually turns on real charges — there's
+  no separate `STRIPE_ENVIRONMENT` flag; it's determined by which keys are
+  set.
+
+**3. PayPal Payouts (withdrawals — PayPal/Venmo only, not cards).**
+This is a separate product from both Braintree and Stripe, with its own
 approval — apply for it from your PayPal Business account (Pay & Get Paid
 → Payouts, or via developer.paypal.com). Once approved, create a REST API
 app at developer.paypal.com to get a Client ID and Secret (distinct from
-the Braintree keys above). Set: `PAYPAL_PAYOUTS_CLIENT_ID`,
+both the Braintree and Stripe keys above). Set: `PAYPAL_PAYOUTS_CLIENT_ID`,
 `PAYPAL_PAYOUTS_SECRET`, `PAYPAL_ENVIRONMENT` (`sandbox` or `live`).
-Without these, deposits work but withdrawal attempts return a clean 503.
+Without these, deposits work but withdrawal attempts return a clean 503 —
+this applies no matter which processor a user deposited through, since
+withdrawals always go out via PayPal Payouts.
 
-**3. Test in sandbox before going anywhere near production keys.**
+**4. Test in sandbox/test mode before going anywhere near live keys.**
 Braintree's sandbox has its own test card numbers and a sandbox Venmo/
-PayPal flow; nothing charges real money until `BRAINTREE_ENVIRONMENT=production`
-and real keys are set. `UNICORN_REAL_MONEY_ENABLED` and KYC verification
-still gate everything on top of this, exactly as before.
+PayPal flow; Stripe's test mode has its own documented test cards. Nothing
+charges real money until `BRAINTREE_ENVIRONMENT=production` (Braintree) or
+live Stripe keys are set. `UNICORN_REAL_MONEY_ENABLED` and KYC
+verification still gate everything on top of this, exactly as before.
 
 ## Market surveillance (anti-manipulation)
 

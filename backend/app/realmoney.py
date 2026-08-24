@@ -137,88 +137,33 @@ class StubPaymentsProvider(PaymentsProvider):
         return {"status": "completed", "provider": self.name, "provider_reference": None}
 
 
-class BraintreePaymentsProvider(PaymentsProvider):
-    """Real payment processing via Braintree (a PayPal company).
+class PayPalPayoutsClient:
+    """Shared withdrawal path for every real deposit provider below.
 
-    Deposits go through Braintree's Drop-in UI, which — once Venmo and
-    PayPal are enabled on the Braintree control panel and Apple Pay is
-    verified there — supports cards, Apple Pay, Venmo, and PayPal in a
-    single integration. The frontend collects a one-time
-    `payment_method_nonce` from Drop-in and sends it here; this class
-    turns that nonce into an actual charge via Transaction.sale().
+    Neither Braintree nor Stripe has a general "send money to a customer"
+    API in the mode we use them (they're built to accept payments, not
+    originate them) — Stripe's equivalent (Connect payouts) is a whole
+    separate onboarding flow per recipient that isn't built here. PayPal
+    Payouts is the one product that just sends money to an email address,
+    so both BraintreePaymentsProvider and StripePaymentsProvider delegate
+    withdrawals to one instance of this class, regardless of which
+    processor a user deposited through. It cannot push money to an
+    arbitrary card — only to a PayPal or Venmo account identified by
+    email/phone. Requires PAYPAL_PAYOUTS_CLIENT_ID, PAYPAL_PAYOUTS_SECRET,
+    PAYPAL_ENVIRONMENT ("sandbox" or "live")."""
 
-    Withdrawals are a different story worth being explicit about: Braintree
-    itself has no general "send money to a customer" API — it's built to
-    accept payments, not originate them. Paying real users back out uses a
-    separate PayPal product, PayPal Payouts, which sends funds to a PayPal
-    or Venmo account identified by email/phone. It cannot push money to an
-    arbitrary card — that would require Visa Direct / Mastercard Send,
-    which needs its own underwriting approval from Braintree/PayPal and
-    isn't wired in here. So today: users can deposit with card, Apple Pay,
-    Venmo, or PayPal, but can only withdraw to a PayPal or Venmo account
-    they provide by email — not straight back to a card.
-
-    Requires env vars: BRAINTREE_MERCHANT_ID, BRAINTREE_PUBLIC_KEY,
-    BRAINTREE_PRIVATE_KEY, BRAINTREE_ENVIRONMENT ("sandbox" or
-    "production"), and for withdrawals: PAYPAL_PAYOUTS_CLIENT_ID,
-    PAYPAL_PAYOUTS_SECRET, PAYPAL_ENVIRONMENT ("sandbox" or "live").
-    """
-
-    name = "braintree"
+    name = "paypal_payouts"
 
     def __init__(self):
-        import braintree as bt
+        self._client_id = os.environ.get("PAYPAL_PAYOUTS_CLIENT_ID", "").strip()
+        self._secret = os.environ.get("PAYPAL_PAYOUTS_SECRET", "").strip()
+        env_name = os.environ.get("PAYPAL_ENVIRONMENT", "sandbox").strip().lower()
+        self._base = "https://api-m.paypal.com" if env_name == "live" else "https://api-m.sandbox.paypal.com"
 
-        self._bt = bt
-        env_name = os.environ.get("BRAINTREE_ENVIRONMENT", "sandbox").strip().lower()
-        bt_environment = bt.Environment.Production if env_name == "production" else bt.Environment.Sandbox
-        merchant_id = os.environ.get("BRAINTREE_MERCHANT_ID", "").strip()
-        public_key = os.environ.get("BRAINTREE_PUBLIC_KEY", "").strip()
-        private_key = os.environ.get("BRAINTREE_PRIVATE_KEY", "").strip()
-        if not (merchant_id and public_key and private_key):
-            raise PaymentsNotConfiguredError(
-                "Braintree isn't configured — BRAINTREE_MERCHANT_ID, BRAINTREE_PUBLIC_KEY, "
-                "and BRAINTREE_PRIVATE_KEY must all be set."
-            )
-        self.gateway = bt.BraintreeGateway(
-            bt.Configuration(
-                environment=bt_environment,
-                merchant_id=merchant_id,
-                public_key=public_key,
-                private_key=private_key,
-            )
-        )
-
-        self._paypal_client_id = os.environ.get("PAYPAL_PAYOUTS_CLIENT_ID", "").strip()
-        self._paypal_secret = os.environ.get("PAYPAL_PAYOUTS_SECRET", "").strip()
-        paypal_env = os.environ.get("PAYPAL_ENVIRONMENT", "sandbox").strip().lower()
-        self._paypal_base = (
-            "https://api-m.paypal.com" if paypal_env == "live" else "https://api-m.sandbox.paypal.com"
-        )
-
-    def client_token(self):
-        """For the frontend to initialize Braintree's Drop-in UI with."""
-        return self.gateway.client_token.generate()
-
-    def create_deposit(self, user_id, amount, payment_method_nonce=None, **kwargs):
-        if not payment_method_nonce:
-            raise PaymentsNotConfiguredError("payment_method_nonce is required to process a deposit.")
-        result = self.gateway.transaction.sale({
-            "amount": f"{amount:.2f}",
-            "payment_method_nonce": payment_method_nonce,
-            "options": {"submit_for_settlement": True},
-        })
-        if result.is_success:
-            txn = result.transaction
-            status = "completed" if txn.status in ("submitted_for_settlement", "settled") else "pending"
-            return {"status": status, "provider": self.name, "provider_reference": txn.id}
-        message = result.message or "Deposit was declined."
-        return {"status": "failed", "provider": self.name, "provider_reference": None, "detail": message}
-
-    def _paypal_access_token(self):
+    def _access_token(self):
         resp = requests.post(
-            f"{self._paypal_base}/v1/oauth2/token",
-            auth=(self._paypal_client_id, self._paypal_secret),
+            f"{self._base}/v1/oauth2/token",
+            auth=(self._client_id, self._secret),
             data={"grant_type": "client_credentials"},
             timeout=15,
         )
@@ -226,8 +171,8 @@ class BraintreePaymentsProvider(PaymentsProvider):
             raise PaymentsNotConfiguredError(f"PayPal Payouts auth failed ({resp.status_code}): {resp.text[:300]}")
         return resp.json()["access_token"]
 
-    def create_withdrawal(self, user_id, amount, payout_email=None, **kwargs):
-        if not (self._paypal_client_id and self._paypal_secret):
+    def send_payout(self, user_id, amount, payout_email=None):
+        if not (self._client_id and self._secret):
             raise PaymentsNotConfiguredError(
                 "PayPal Payouts isn't configured — PAYPAL_PAYOUTS_CLIENT_ID and "
                 "PAYPAL_PAYOUTS_SECRET must be set to send withdrawals."
@@ -235,12 +180,12 @@ class BraintreePaymentsProvider(PaymentsProvider):
         if not payout_email:
             raise PaymentsNotConfiguredError(
                 "A PayPal or Venmo email is required to receive a withdrawal — "
-                "Braintree/PayPal can't push money to an arbitrary card."
+                "neither Braintree nor Stripe here can push money to an arbitrary card."
             )
-        token = self._paypal_access_token()
+        token = self._access_token()
         sender_batch_id = f"unicorn-w-{user_id}-{int(amount * 100)}-{os.urandom(4).hex()}"
         resp = requests.post(
-            f"{self._paypal_base}/v1/payments/payouts",
+            f"{self._base}/v1/payments/payouts",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
             json={
                 "sender_batch_header": {
@@ -267,24 +212,194 @@ class BraintreePaymentsProvider(PaymentsProvider):
         status = "completed" if batch_status in ("SUCCESS", "PROCESSING", "PENDING") else "pending"
         # Payouts are asynchronous on PayPal's side even when accepted here — PENDING/PROCESSING
         # still means the batch was accepted, not that cash has landed yet. Treat all three as
-        # "completed" from UNICORN's side (money is committed), matching how the deposit path
-        # treats settlement as fire-and-forget once Braintree accepts the transaction.
+        # "completed" from UNICORN's side (money is committed), matching how deposits treat
+        # settlement as fire-and-forget once the processor accepts the transaction.
         return {
             "status": status, "provider": self.name,
             "provider_reference": (body.get("batch_header") or {}).get("payout_batch_id"),
         }
 
 
-def _build_payments_provider():
-    """Prefers a real Braintree integration when it's configured; falls back to
-    the inert stub otherwise (local dev, or a deploy that hasn't set up a
-    processor yet). Never silently prefers the stub once real credentials are
-    present — if Braintree env vars are set but something's wrong with them,
-    that should surface as an error, not a silent fallback to fake payments."""
+class BraintreePaymentsProvider(PaymentsProvider):
+    """Real payment processing via Braintree (a PayPal company).
+
+    Deposits go through Braintree's Drop-in UI, which — once Venmo and
+    PayPal are enabled on the Braintree control panel and Apple Pay is
+    verified there — supports cards, Apple Pay, Venmo, and PayPal in a
+    single integration. The frontend collects a one-time
+    `payment_method_nonce` from Drop-in and sends it here; this class
+    turns that nonce into an actual charge via Transaction.sale().
+
+    Withdrawals go through PayPalPayoutsClient (see above) — not anything
+    Braintree-specific.
+
+    Requires env vars: BRAINTREE_MERCHANT_ID, BRAINTREE_PUBLIC_KEY,
+    BRAINTREE_PRIVATE_KEY, BRAINTREE_ENVIRONMENT ("sandbox" or
+    "production").
+    """
+
+    name = "braintree"
+
+    def __init__(self):
+        import braintree as bt
+
+        self._bt = bt
+        env_name = os.environ.get("BRAINTREE_ENVIRONMENT", "sandbox").strip().lower()
+        bt_environment = bt.Environment.Production if env_name == "production" else bt.Environment.Sandbox
+        merchant_id = os.environ.get("BRAINTREE_MERCHANT_ID", "").strip()
+        public_key = os.environ.get("BRAINTREE_PUBLIC_KEY", "").strip()
+        private_key = os.environ.get("BRAINTREE_PRIVATE_KEY", "").strip()
+        if not (merchant_id and public_key and private_key):
+            raise PaymentsNotConfiguredError(
+                "Braintree isn't configured — BRAINTREE_MERCHANT_ID, BRAINTREE_PUBLIC_KEY, "
+                "and BRAINTREE_PRIVATE_KEY must all be set."
+            )
+        self.gateway = bt.BraintreeGateway(
+            bt.Configuration(
+                environment=bt_environment,
+                merchant_id=merchant_id,
+                public_key=public_key,
+                private_key=private_key,
+            )
+        )
+        self._payouts = PayPalPayoutsClient()
+
+    def client_token(self):
+        """For the frontend to initialize Braintree's Drop-in UI with."""
+        return self.gateway.client_token.generate()
+
+    def create_deposit(self, user_id, amount, payment_method_nonce=None, **kwargs):
+        if not payment_method_nonce:
+            raise PaymentsNotConfiguredError("payment_method_nonce is required to process a deposit.")
+        result = self.gateway.transaction.sale({
+            "amount": f"{amount:.2f}",
+            "payment_method_nonce": payment_method_nonce,
+            "options": {"submit_for_settlement": True},
+        })
+        if result.is_success:
+            txn = result.transaction
+            status = "completed" if txn.status in ("submitted_for_settlement", "settled") else "pending"
+            return {"status": status, "provider": self.name, "provider_reference": txn.id}
+        message = result.message or "Deposit was declined."
+        return {"status": "failed", "provider": self.name, "provider_reference": None, "detail": message}
+
+    def create_withdrawal(self, user_id, amount, payout_email=None, **kwargs):
+        return self._payouts.send_payout(user_id, amount, payout_email)
+
+
+class StripePaymentsProvider(PaymentsProvider):
+    """Real payment processing via Stripe.
+
+    Stripe's payment-methods list (checked directly against their current
+    docs) covers cards, Apple Pay, Google Pay, and Link — notably not
+    Venmo, which is why Braintree stays in this app too rather than being
+    replaced. Deposits use Stripe's modern "deferred" Payment Element
+    flow, which is a two-step handshake rather than Braintree's one-shot
+    nonce:
+
+      1. Frontend asks the backend for a PaymentIntent (create_payment_intent
+         below) *before* the user has entered payment details, and gets back
+         a client_secret. A `real_money_transactions` row is inserted
+         'pending' at this point (see server.py) so nothing is lost if the
+         browser tab closes mid-payment.
+      2. Frontend collects card/Apple Pay/Google Pay/Link details with
+         Stripe.js's Payment Element and confirms the PaymentIntent
+         client-side (stripe.confirmPayment) — this is also where Stripe
+         handles any 3D Secure / SCA challenge, entirely in the browser.
+      3. Frontend calls the backend's finalize step, which re-checks the
+         PaymentIntent's status directly with Stripe (check_deposit_status
+         below) rather than trusting whatever the client reports, and only
+         then credits real_balance.
+
+    Withdrawals go through PayPalPayoutsClient (see above), exactly like
+    Braintree's — Stripe's own payout mechanism (Connect) requires each
+    recipient to complete their own onboarding with Stripe and isn't wired
+    in here.
+
+    Requires env vars: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY.
+    """
+
+    name = "stripe"
+
+    def __init__(self):
+        import stripe
+
+        secret_key = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+        if not secret_key:
+            raise PaymentsNotConfiguredError("Stripe isn't configured — STRIPE_SECRET_KEY must be set.")
+        self._stripe = stripe
+        self._stripe.api_key = secret_key
+        self._publishable_key = os.environ.get("STRIPE_PUBLISHABLE_KEY", "").strip()
+        self._payouts = PayPalPayoutsClient()
+
+    def publishable_key(self):
+        """For the frontend to initialize Stripe.js with. Safe to expose
+        publicly by design — it's Stripe's publishable, not secret, key."""
+        if not self._publishable_key:
+            raise PaymentsNotConfiguredError("STRIPE_PUBLISHABLE_KEY isn't set.")
+        return self._publishable_key
+
+    def create_payment_intent(self, user_id, amount):
+        intent = self._stripe.PaymentIntent.create(
+            amount=int(round(amount * 100)),
+            currency="usd",
+            automatic_payment_methods={"enabled": True},
+            metadata={"unicorn_user_id": str(user_id)},
+        )
+        return {"client_secret": intent.client_secret, "payment_intent_id": intent.id}
+
+    def check_deposit_status(self, payment_intent_id):
+        """Called after the frontend finishes Stripe.js confirmation, to
+        verify server-side (never trust the client's word alone) before
+        crediting real_balance."""
+        intent = self._stripe.PaymentIntent.retrieve(payment_intent_id)
+        if intent.status == "succeeded":
+            return {"status": "completed", "provider": self.name, "provider_reference": intent.id}
+        if intent.status in ("requires_action", "requires_confirmation", "processing"):
+            return {"status": "pending", "provider": self.name, "provider_reference": intent.id}
+        return {
+            "status": "failed", "provider": self.name, "provider_reference": intent.id,
+            "detail": f"Stripe PaymentIntent status: {intent.status}",
+        }
+
+    def create_deposit(self, user_id, amount, **kwargs):
+        # Deposits are two-step for Stripe (see class docstring) — server.py
+        # calls create_payment_intent + check_deposit_status directly rather
+        # than this single-call method, which only exists to satisfy the
+        # PaymentsProvider interface.
+        raise NotImplementedError(
+            "StripePaymentsProvider uses create_payment_intent + check_deposit_status, "
+            "not create_deposit — see /api/real-money/stripe/* in server.py."
+        )
+
+    def create_withdrawal(self, user_id, amount, payout_email=None, **kwargs):
+        return self._payouts.send_payout(user_id, amount, payout_email)
+
+
+def _build_deposit_providers():
+    """Builds one entry per configured real processor — both can be active
+    side by side, so users see a choice (e.g. "Venmo? use Braintree" vs
+    "Google Pay? use Stripe") rather than the app picking one for them.
+    Falls back to the inert stub only when NEITHER is configured. Never
+    silently swaps in the stub when a processor's env vars are present but
+    broken — that should surface as an error, not fake success."""
+    providers = {}
     if os.environ.get("BRAINTREE_MERCHANT_ID", "").strip():
-        return BraintreePaymentsProvider()
-    return StubPaymentsProvider()
+        providers["braintree"] = BraintreePaymentsProvider()
+    if os.environ.get("STRIPE_SECRET_KEY", "").strip():
+        providers["stripe"] = StripePaymentsProvider()
+    if not providers:
+        providers["stub"] = StubPaymentsProvider()
+    return providers
 
 
 kyc_provider = ManualKYCProvider()
-payments_provider = _build_payments_provider()
+deposit_providers = _build_deposit_providers()
+
+# Withdrawals aren't processor-specific (both real providers delegate to the
+# same PayPalPayoutsClient) — this just picks whichever real provider is
+# configured to handle /api/real-money/withdraw, preferring Braintree
+# arbitrarily when both are present since either behaves identically for
+# withdrawal purposes. Kept as a single name, `payments_provider`, since
+# server.py's withdraw endpoint only ever needs one.
+payments_provider = deposit_providers.get("braintree") or deposit_providers.get("stripe") or deposit_providers["stub"]

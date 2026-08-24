@@ -1123,25 +1123,136 @@ def _require_kyc_verified(conn):
     return None
 
 
-@app.get("/api/braintree/client-token")
+@app.get("/api/real-money/payment-config")
 @require_session_auth
-def braintree_client_token():
-    """The frontend calls this to initialize Braintree's Drop-in UI, which
-    is what actually shows the card / Apple Pay / Venmo / PayPal picker.
-    404s with the same "not enabled yet" message as the other real-money
-    routes if this deploy isn't configured for real payments yet."""
+def real_money_payment_config():
+    """The frontend calls this to find out which real deposit processors
+    are actually configured on this deploy, and to get whatever each one
+    needs to initialize its own widget client-side (Braintree's Drop-in UI
+    needs a client_token; Stripe's Payment Element needs a publishable
+    key). Both can come back at once — that's the point of running them
+    side by side — or neither, if this deploy hasn't configured either
+    yet, in which case the frontend just shows nothing rather than erroring."""
     blocked = _require_real_money_enabled()
     if blocked:
         return blocked
-    if not hasattr(realmoney.payments_provider, "client_token"):
-        return jsonify({
-            "detail": "No real payment processor is connected on this deploy yet.",
-        }), 503
+    providers = {}
+    bt = realmoney.deposit_providers.get("braintree")
+    if bt is not None and hasattr(bt, "client_token"):
+        try:
+            providers["braintree"] = {"client_token": bt.client_token()}
+        except realmoney.PaymentsNotConfiguredError:
+            pass
+    st = realmoney.deposit_providers.get("stripe")
+    if st is not None and hasattr(st, "publishable_key"):
+        try:
+            providers["stripe"] = {"publishable_key": st.publishable_key()}
+        except realmoney.PaymentsNotConfiguredError:
+            pass
+    return jsonify({"providers": providers})
+
+
+@app.post("/api/real-money/stripe/create-intent")
+@require_session_auth
+@rate_limit(10, 60)
+def real_money_stripe_create_intent():
+    """Step 1 of the Stripe deposit flow — see StripePaymentsProvider's
+    docstring in realmoney.py for why this is two calls instead of one
+    like the Braintree path below. Inserts a 'pending' ledger row up
+    front so an abandoned payment still leaves an audit trail."""
+    blocked = _require_real_money_enabled()
+    if blocked:
+        return blocked
+
+    conn = db.get_db()
+    kyc_blocked = _require_kyc_verified(conn)
+    if kyc_blocked:
+        return kyc_blocked
+
+    data = request.get_json(force=True, silent=True) or {}
     try:
-        token = realmoney.payments_provider.client_token()
+        amount = round(float(data.get("amount")), 2)
+    except (TypeError, ValueError):
+        return jsonify({"detail": "amount must be a number"}), 400
+    if amount < REAL_MONEY_DEPOSIT_MIN or amount > REAL_MONEY_DEPOSIT_MAX:
+        return jsonify({
+            "detail": f"amount must be between ${REAL_MONEY_DEPOSIT_MIN:.2f} and ${REAL_MONEY_DEPOSIT_MAX:,.2f}",
+        }), 400
+
+    stripe_provider = realmoney.deposit_providers.get("stripe")
+    if stripe_provider is None:
+        return jsonify({"detail": "Stripe isn't connected on this deploy yet."}), 503
+    try:
+        intent = stripe_provider.create_payment_intent(g.user["id"], amount)
     except realmoney.PaymentsNotConfiguredError as e:
         return jsonify({"detail": str(e)}), 503
-    return jsonify({"client_token": token})
+
+    conn.execute(
+        "INSERT INTO real_money_transactions (user_id, type, amount, status, provider, provider_reference) "
+        "VALUES (?, 'deposit', ?, 'pending', 'stripe', ?)",
+        (g.user["id"], amount, intent["payment_intent_id"]),
+    )
+    conn.commit()
+    return jsonify(intent)
+
+
+@app.post("/api/real-money/stripe/finalize")
+@require_session_auth
+@rate_limit(10, 60)
+def real_money_stripe_finalize():
+    """Step 3 of the Stripe deposit flow — called after Stripe.js confirms
+    the PaymentIntent client-side. Re-checks status directly with Stripe
+    (never trusts the client's word alone) before crediting real_balance."""
+    blocked = _require_real_money_enabled()
+    if blocked:
+        return blocked
+
+    conn = db.get_db()
+    kyc_blocked = _require_kyc_verified(conn)
+    if kyc_blocked:
+        return kyc_blocked
+
+    data = request.get_json(force=True, silent=True) or {}
+    payment_intent_id = (data.get("payment_intent_id") or "").strip()
+    if not payment_intent_id:
+        return jsonify({"detail": "payment_intent_id is required"}), 400
+
+    stripe_provider = realmoney.deposit_providers.get("stripe")
+    if stripe_provider is None:
+        return jsonify({"detail": "Stripe isn't connected on this deploy yet."}), 503
+
+    row = conn.execute(
+        "SELECT * FROM real_money_transactions WHERE user_id = ? AND provider = 'stripe' "
+        "AND provider_reference = ? AND type = 'deposit' ORDER BY created_at DESC LIMIT 1",
+        (g.user["id"], payment_intent_id),
+    ).fetchone()
+    if row is None:
+        return jsonify({"detail": "No matching deposit attempt found for this payment."}), 404
+
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
+    if row["status"] == "completed":
+        return jsonify({"status": "completed", "real_balance": user["real_balance"], "amount": row["amount"]})
+
+    try:
+        result = stripe_provider.check_deposit_status(payment_intent_id)
+    except realmoney.PaymentsNotConfiguredError as e:
+        return jsonify({"detail": str(e)}), 503
+
+    new_balance = user["real_balance"]
+    if result["status"] == "completed":
+        new_balance = round(user["real_balance"] + row["amount"], 2)
+        conn.execute("UPDATE users SET real_balance = ? WHERE id = ?", (new_balance, user["id"]))
+        conn.execute(
+            "UPDATE real_money_transactions SET status = 'completed', real_balance_after = ?, completed_at = ? "
+            "WHERE id = ?",
+            (new_balance, now_iso(), row["id"]),
+        )
+        _audit(conn, user["id"], user["id"], "real_money_deposit",
+               f"amount={row['amount']} status=completed provider=stripe")
+    else:
+        conn.execute("UPDATE real_money_transactions SET status = ? WHERE id = ?", (result["status"], row["id"]))
+    conn.commit()
+    return jsonify({"status": result["status"], "real_balance": new_balance, "amount": row["amount"]})
 
 
 @app.post("/api/real-money/deposit")
@@ -1167,9 +1278,17 @@ def real_money_deposit():
             "detail": f"amount must be between ${REAL_MONEY_DEPOSIT_MIN:.2f} and ${REAL_MONEY_DEPOSIT_MAX:,.2f}",
         }), 400
 
+    # This endpoint is specifically the Braintree nonce-based path — Stripe
+    # deposits go through /api/real-money/stripe/create-intent + finalize
+    # instead (see StripePaymentsProvider's docstring for why). Falls back
+    # to the stub provider when neither real processor is configured, so
+    # UNICORN_ALLOW_STUB_PAYMENTS-based testing keeps working unchanged.
+    braintree_provider = realmoney.deposit_providers.get("braintree") or realmoney.deposit_providers.get("stub")
+    if braintree_provider is None:
+        return jsonify({"detail": "Braintree isn't connected on this deploy yet."}), 503
     payment_method_nonce = (data.get("payment_method_nonce") or "").strip() or None
     try:
-        result = realmoney.payments_provider.create_deposit(
+        result = braintree_provider.create_deposit(
             g.user["id"], amount, payment_method_nonce=payment_method_nonce,
         )
     except realmoney.PaymentsNotConfiguredError as e:

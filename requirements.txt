@@ -3,3 +3,4 @@ gunicorn>=21.2
 eth-account>=0.10
 requests>=2.31
 braintree>=4.28
+stripe>=10.0
