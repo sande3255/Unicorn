@@ -452,6 +452,48 @@ are all in place, wiring them in is "write one class per interface," not
 full list of what's still needed, and `UNICORN_Licensing_Punch_List` for
 the regulatory path itself.
 
+## Market surveillance (anti-manipulation)
+
+A real derivatives exchange has to show it can actually detect
+manipulation and settlement-integrity problems, not just settle contracts
+correctly — this was the single biggest gap flagged in
+`UNICORN_Licensing_Punch_List`, and unlike KYC/payments/custody, it's pure
+engineering work that doesn't need a vendor contract, a bank partner, or
+anyone's sign-off to build. `backend/app/surveillance.py` runs
+continuously (wired into the background scheduler, `scheduler.py`) against
+real trading activity — including today's play money, so the detection
+logic gets exercised and trusted long before it ever matters for real
+money.
+
+**What it looks for**, all as heuristics worth a human look, not proof of
+wrongdoing:
+
+- **Wash trading** — two distinct accounts repeatedly taking opposite
+  sides of the same market within a few minutes of each other.
+- **Rapid self-reversal** — one account flipping between buying and
+  selling the same outcome several times in a short window.
+- **Large trades near settlement** — a trade placed shortly before a
+  market's `close_time` that's far larger than that market's typical trade
+  size.
+- **Coordinated new accounts** — several accounts created close together
+  in time, all trading the same market within a short window of each
+  other.
+
+Nothing here blocks a trade or auto-resolves anything — every hit is
+written to the new `surveillance_flags` table for a human to review from
+the admin **Market surveillance** card (`GET /api/admin/surveillance`,
+`POST /api/admin/surveillance/<id>/resolve` or `/dismiss`, both
+`@require_admin` and logged to `audit_log`). Re-running the scan never
+double-flags the same open issue — a 24-hour dedup window (see
+`DEDUPE_COOLDOWN_HOURS` in `surveillance.py`) suppresses repeat inserts for
+a combination that's already open. Thresholds are deliberately
+conservative starting points (documented inline in `surveillance.py`);
+tune them once there's a real trading-volume baseline to tune against.
+Tested end-to-end in `test_surveillance.py` (all four detectors, dedup
+behavior, and that benign trading isn't flagged) and
+`test_surveillance_api.py` (the actual Flask endpoints, permissions, and
+audit logging).
+
 ## How the pricing works
 
 Each market has a liquidity parameter `b`. Buying shares of an outcome
@@ -488,6 +530,10 @@ connecting real money, at minimum you'd need:
   jurisdiction and keep that list current.
 - **Custody and solvency controls** — segregating user funds, proving the
   house can always cover its LMSR exposure, audited reserves.
+- ~~Market surveillance / anti-manipulation detection~~ — built; see
+  "Market surveillance" above. This was the punch list's single biggest
+  flagged engineering gap and is now running continuously against real
+  trading activity, ahead of everything else in this list.
 - **A production-grade price feed** — CoinGecko and Yahoo Finance's free
   endpoints are fine for a demo; a real settlement engine needs a licensed,
   SLA-backed market data vendor so a feed outage or a manipulated price

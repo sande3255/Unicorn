@@ -6,7 +6,7 @@ from functools import wraps
 
 from flask import Flask, request, jsonify, g, send_from_directory
 
-from . import db, amm, scheduler, wallet_auth, email_feed, realmoney
+from . import db, amm, scheduler, wallet_auth, email_feed, realmoney, surveillance
 from .security import (
     hash_password, verify_password, new_token,
     generate_api_key, hash_api_key, API_KEY_PREFIX,
@@ -1222,6 +1222,90 @@ def real_money_transactions():
         (g.user["id"],),
     ).fetchall()
     return jsonify({"transactions": [dict(r) for r in rows]})
+
+
+# ---------- surveillance (market integrity) routes ----------
+#
+# Deliberately gated only by @require_admin, not by real-money mode — see
+# surveillance.py's module docstring. An admin should be able to see and
+# review flags against ordinary play-money trading today, since that's how
+# the detection logic gets exercised and trusted before it ever matters for
+# real money.
+
+@app.get("/api/admin/surveillance")
+@require_admin
+def admin_surveillance_queue():
+    """?status=open (default) | resolved | dismissed | all"""
+    status = (request.args.get("status") or "open").strip().lower()
+    conn = db.get_db()
+    if status == "all":
+        rows = conn.execute(
+            "SELECT surveillance_flags.*, "
+            "u.username AS username, ru.username AS related_username, "
+            "m.question AS market_question "
+            "FROM surveillance_flags "
+            "LEFT JOIN users u ON u.id = surveillance_flags.user_id "
+            "LEFT JOIN users ru ON ru.id = surveillance_flags.related_user_id "
+            "LEFT JOIN markets m ON m.id = surveillance_flags.market_id "
+            "ORDER BY surveillance_flags.created_at DESC LIMIT 200"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT surveillance_flags.*, "
+            "u.username AS username, ru.username AS related_username, "
+            "m.question AS market_question "
+            "FROM surveillance_flags "
+            "LEFT JOIN users u ON u.id = surveillance_flags.user_id "
+            "LEFT JOIN users ru ON ru.id = surveillance_flags.related_user_id "
+            "LEFT JOIN markets m ON m.id = surveillance_flags.market_id "
+            "WHERE surveillance_flags.status = ? "
+            "ORDER BY surveillance_flags.created_at ASC LIMIT 200",
+            (status,),
+        ).fetchall()
+    return jsonify({"flags": [
+        {
+            "id": r["id"], "flag_type": r["flag_type"], "severity": r["severity"], "status": r["status"],
+            "detail": r["detail"], "market_id": r["market_id"], "market_question": r["market_question"],
+            "user_id": r["user_id"], "username": r["username"],
+            "related_user_id": r["related_user_id"], "related_username": r["related_username"],
+            "created_at": r["created_at"], "reviewed_at": r["reviewed_at"],
+            "reviewed_by_user_id": r["reviewed_by_user_id"],
+        }
+        for r in rows
+    ]})
+
+
+def _review_surveillance_flag(flag_id, new_status, event_type):
+    conn = db.get_db()
+    row = conn.execute("SELECT * FROM surveillance_flags WHERE id = ?", (flag_id,)).fetchone()
+    if row is None:
+        return jsonify({"detail": "Not found"}), 404
+    if row["status"] != "open":
+        return jsonify({"detail": f"Flag #{flag_id} was already {row['status']}"}), 409
+    conn.execute(
+        "UPDATE surveillance_flags SET status = ?, reviewed_by_user_id = ?, reviewed_at = ? WHERE id = ?",
+        (new_status, g.user["id"], now_iso(), flag_id),
+    )
+    _audit(conn, row["user_id"], g.user["id"], event_type,
+           f"flag_id={flag_id} flag_type={row['flag_type']} market_id={row['market_id']}")
+    conn.commit()
+    return jsonify({"status": new_status})
+
+
+@app.post("/api/admin/surveillance/<int:flag_id>/resolve")
+@require_admin
+def admin_surveillance_resolve(flag_id):
+    """Marks a flag as reviewed and acted on (e.g. the account was warned or
+    restricted as a result)."""
+    return _review_surveillance_flag(flag_id, "resolved", "surveillance_flag_resolved")
+
+
+@app.post("/api/admin/surveillance/<int:flag_id>/dismiss")
+@require_admin
+def admin_surveillance_dismiss(flag_id):
+    """Marks a flag as reviewed and judged a false positive / no action
+    needed."""
+    return _review_surveillance_flag(flag_id, "dismissed", "surveillance_flag_dismissed")
 
 
 # ---------- market routes ----------

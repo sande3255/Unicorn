@@ -226,6 +226,31 @@ CREATE TABLE IF NOT EXISTS audit_log (
     FOREIGN KEY (user_id) REFERENCES users(id),
     FOREIGN KEY (actor_user_id) REFERENCES users(id)
 );
+
+-- Market surveillance / anti-manipulation flags (see backend/app/surveillance.py).
+-- One row per candidate manipulation pattern a detector has surfaced;
+-- nothing here is automatically acted on — an admin reviews each flag and
+-- moves it out of 'open' via the review endpoints in server.py. Runs
+-- against ordinary play-money trading today, not gated behind real-money
+-- mode, since the whole point is to have this exercised and trustworthy
+-- well before real money is involved.
+CREATE TABLE IF NOT EXISTS surveillance_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    flag_type TEXT NOT NULL,
+    market_id INTEGER,
+    user_id INTEGER,
+    related_user_id INTEGER,
+    detail TEXT NOT NULL,
+    severity TEXT NOT NULL DEFAULT 'info',
+    status TEXT NOT NULL DEFAULT 'open',
+    reviewed_by_user_id INTEGER,
+    reviewed_at TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (market_id) REFERENCES markets(id),
+    FOREIGN KEY (user_id) REFERENCES users(id),
+    FOREIGN KEY (related_user_id) REFERENCES users(id),
+    FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id)
+);
 """
 
 
@@ -454,6 +479,19 @@ def _migrate(conn):
     )
 
     conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_user ON audit_log(user_id, created_at)")
+
+    # run_surveillance_scan()'s dedupe check (surveillance.py) filters by
+    # (flag_type, market_id, user_id, related_user_id, status, created_at)
+    # on every detector hit; the admin queue (GET /api/admin/surveillance)
+    # filters by status and sorts by created_at.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_surveillance_flags_dedupe "
+        "ON surveillance_flags(flag_type, status, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_surveillance_flags_status_created "
+        "ON surveillance_flags(status, created_at)"
+    )
 
     conn.commit()
 

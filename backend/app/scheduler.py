@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 
-from . import db, price_feed, external_markets, sports_feed, odds_feed, amm
+from . import db, price_feed, external_markets, sports_feed, odds_feed, amm, surveillance
 from .resolution import apply_resolution
 
 TICK_SECONDS = 15
@@ -535,11 +535,21 @@ SPORTS_SYNC_EVERY_N_TICKS = 2
 # depends on odds markets refreshing quickly.
 ODDS_SYNC_EVERY_N_TICKS = 240
 
+# Surveillance is pure read-then-maybe-insert against tables that already
+# exist (transactions/markets/users) — no external API calls, so there's no
+# cost reason to run it as rarely as the external/odds syncs above. 4 ticks
+# * 15s = ~1 minute: frequent enough that a wash-trading or large-trade
+# pattern gets flagged within about a minute of happening, without adding
+# meaningful load re-scanning the same recent window every single tick.
+SURVEILLANCE_SYNC_EVERY_N_TICKS = 4
+
 
 def run_loop(interval_seconds=TICK_SECONDS, price_fetcher=price_feed.get_price, log=print, stop_event=None,
              sync_externals=sync_external_markets, external_sync_every=EXTERNAL_SYNC_EVERY_N_TICKS,
              sync_sports=sports_tick, sports_sync_every=SPORTS_SYNC_EVERY_N_TICKS,
-             sync_odds=odds_tick, odds_sync_every=ODDS_SYNC_EVERY_N_TICKS):
+             sync_odds=odds_tick, odds_sync_every=ODDS_SYNC_EVERY_N_TICKS,
+             sync_surveillance=surveillance.run_surveillance_scan,
+             surveillance_sync_every=SURVEILLANCE_SYNC_EVERY_N_TICKS):
     conn = _get_conn()
     tick_count = 0
     while stop_event is None or not stop_event.is_set():
@@ -551,6 +561,8 @@ def run_loop(interval_seconds=TICK_SECONDS, price_fetcher=price_feed.get_price, 
                 sync_sports(conn, log=log)
             if tick_count % odds_sync_every == 0:
                 sync_odds(conn, log=log)
+            if tick_count % surveillance_sync_every == 0:
+                sync_surveillance(conn, log=log)
         except Exception as e:  # noqa: BLE001 - keep the loop alive no matter what
             log(f"[scheduler] tick error: {e}")
         tick_count += 1

@@ -1707,6 +1707,60 @@ async function loadKycQueue() {
   }
 }
 
+async function loadSurveillanceQueue() {
+  const el = document.getElementById('surveillance-queue');
+  if (!el) return; // guard: admin may have navigated away before this resolves
+  try {
+    const { flags } = await api('/api/admin/surveillance?status=open');
+    if (!flags.length) {
+      el.innerHTML = `<p class="muted">No open surveillance flags.</p>`;
+      return;
+    }
+    const severityLabel = { high: 'High', warning: 'Warning', info: 'Info' };
+    el.innerHTML = flags.map(f => `
+      <div style="padding:10px 0;border-bottom:1px solid var(--gridline);">
+        <div><strong>${escapeHtml(severityLabel[f.severity] || f.severity)}</strong> — ${escapeHtml(f.flag_type)}
+          ${f.market_id ? ` · market #${f.market_id}${f.market_question ? ': ' + escapeHtml(f.market_question) : ''}` : ''}
+        </div>
+        <div class="muted" style="font-size:13px;">
+          ${f.username ? `Account: ${escapeHtml(f.username)} (#${f.user_id})` : ''}
+          ${f.related_username ? ` · related account: ${escapeHtml(f.related_username)} (#${f.related_user_id})` : ''}
+        </div>
+        <div style="margin-top:4px;">${escapeHtml(f.detail)}</div>
+        <div class="muted" style="font-size:12px;margin-top:2px;">Flagged ${escapeHtml(f.created_at)}</div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button data-id="${f.id}" class="surveillance-resolve-btn">Mark resolved</button>
+          <button data-id="${f.id}" class="surveillance-dismiss-btn danger">Dismiss</button>
+        </div>
+      </div>
+    `).join('');
+    el.querySelectorAll('.surveillance-resolve-btn').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Mark this flag as resolved (reviewed and acted on)?')) return;
+        try {
+          await api(`/api/admin/surveillance/${btn.dataset.id}/resolve`, { method: 'POST' });
+          loadSurveillanceQueue();
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+    });
+    el.querySelectorAll('.surveillance-dismiss-btn').forEach(btn => {
+      btn.onclick = async () => {
+        if (!confirm('Dismiss this flag as a false positive / no action needed?')) return;
+        try {
+          await api(`/api/admin/surveillance/${btn.dataset.id}/dismiss`, { method: 'POST' });
+          loadSurveillanceQueue();
+        } catch (e) {
+          alert(e.message);
+        }
+      };
+    });
+  } catch (e) {
+    el.innerHTML = `<p class="error-text">${escapeHtml(e.message)}</p>`;
+  }
+}
+
 async function renderAdmin() {
   appEl.innerHTML = `
     <h1>Admin</h1>
@@ -1716,6 +1770,11 @@ async function renderAdmin() {
       <div id="kyc-queue">Loading…</div>
     </div>
     ` : ''}
+    <div class="card">
+      <h2>Market surveillance — anti-manipulation flags</h2>
+      <p class="muted">Automated heuristics (wash trading, rapid self-reversal, oversized trades near settlement, coordinated new accounts) run continuously against trading activity and surface anything worth a human look here. A flag is a lead, not a finding — review it and mark it resolved or dismiss it as a false positive.</p>
+      <div id="surveillance-queue">Loading…</div>
+    </div>
     <div class="card">
       <h2>Deposit fee revenue (play money — models the mechanic, not real revenue)</h2>
       <div id="deposits-summary">Loading…</div>
@@ -1773,6 +1832,7 @@ async function renderAdmin() {
   if (state.user.real_money_enabled) {
     loadKycQueue();
   }
+  loadSurveillanceQueue();
 
   document.getElementById('create-market-form').onsubmit = async (e) => {
     e.preventDefault();
