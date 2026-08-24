@@ -1372,15 +1372,18 @@ function realMoneySectionHtml(status) {
   if (status === 'verified') {
     return `
       <p class="muted">Real balance: <strong>${fmtMoney(state.user.real_balance || 0)}</strong></p>
-      <form id="real-deposit-form" class="inline-form">
+      <form id="real-deposit-form" class="inline-form" style="flex-direction:column;align-items:stretch;gap:8px;">
         <input id="real-deposit-amount" type="number" min="1" max="10000" step="0.01" placeholder="Amount ($)" required>
-        <button type="submit" class="btn primary">Deposit</button>
+        <div id="braintree-dropin-container"></div>
+        <button type="submit" class="btn primary" id="real-deposit-submit" disabled>Pay</button>
       </form>
       <div id="real-deposit-result"></div>
       <form id="real-withdraw-form" class="inline-form" style="margin-top:10px;">
         <input id="real-withdraw-amount" type="number" min="1" step="0.01" placeholder="Amount ($)" required>
+        <input id="real-withdraw-email" type="email" placeholder="PayPal or Venmo email" required>
         <button type="submit" class="btn">Withdraw</button>
       </form>
+      <p class="muted" style="font-size:12px;margin:4px 0 0;">Withdrawals go to a PayPal or Venmo account by email — not directly back to a card.</p>
       <div id="real-withdraw-result"></div>
       <div id="real-money-history" class="muted" style="font-size:13px;margin-top:10px;">Loading transaction history…</div>
     `;
@@ -1478,32 +1481,47 @@ async function renderAccount() {
   if (state.user.real_money_enabled) {
     const kycStatus = state.user.kyc_status || 'unverified';
     if (kycStatus === 'verified') {
+      initBraintreeDropin();
       document.getElementById('real-deposit-form').onsubmit = async (e) => {
         e.preventDefault();
         const resultEl = document.getElementById('real-deposit-result');
         const amount = parseFloat(document.getElementById('real-deposit-amount').value);
+        const submitBtn = document.getElementById('real-deposit-submit');
+        if (!window._btDropin) {
+          resultEl.innerHTML = `<p class="error-text">Payment form isn't ready yet — try again in a moment.</p>`;
+          return;
+        }
+        submitBtn.disabled = true;
         try {
-          const result = await api('/api/real-money/deposit', { method: 'POST', body: { amount } });
+          const { nonce } = await window._btDropin.requestPaymentMethod();
+          const result = await api('/api/real-money/deposit', {
+            method: 'POST', body: { amount, payment_method_nonce: nonce },
+          });
           state.user.real_balance = result.real_balance;
           resultEl.innerHTML = result.status === 'completed'
             ? `<p class="muted" style="font-size:13px;">Deposited. New real balance: <strong>${fmtMoney(result.real_balance)}</strong>.</p>`
-            : `<p class="muted" style="font-size:13px;">Deposit ${escapeHtml(result.status)}.</p>`;
+            : `<p class="muted" style="font-size:13px;">Deposit ${escapeHtml(result.status)}${result.detail ? ': ' + escapeHtml(result.detail) : ''}.</p>`;
           document.getElementById('real-deposit-amount').value = '';
+          window._btDropin.clearSelectedPaymentMethod();
         } catch (err) {
           resultEl.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+        } finally {
+          submitBtn.disabled = false;
         }
       };
       document.getElementById('real-withdraw-form').onsubmit = async (e) => {
         e.preventDefault();
         const resultEl = document.getElementById('real-withdraw-result');
         const amount = parseFloat(document.getElementById('real-withdraw-amount').value);
+        const payout_email = document.getElementById('real-withdraw-email').value.trim();
         try {
-          const result = await api('/api/real-money/withdraw', { method: 'POST', body: { amount } });
+          const result = await api('/api/real-money/withdraw', { method: 'POST', body: { amount, payout_email } });
           state.user.real_balance = result.real_balance;
           resultEl.innerHTML = result.status === 'completed'
-            ? `<p class="muted" style="font-size:13px;">Withdrawal sent. New real balance: <strong>${fmtMoney(result.real_balance)}</strong>.</p>`
-            : `<p class="muted" style="font-size:13px;">Withdrawal ${escapeHtml(result.status)}.</p>`;
+            ? `<p class="muted" style="font-size:13px;">Withdrawal sent to ${escapeHtml(payout_email)}. New real balance: <strong>${fmtMoney(result.real_balance)}</strong>.</p>`
+            : `<p class="muted" style="font-size:13px;">Withdrawal ${escapeHtml(result.status)}${result.detail ? ': ' + escapeHtml(result.detail) : ''}.</p>`;
           document.getElementById('real-withdraw-amount').value = '';
+          document.getElementById('real-withdraw-email').value = '';
         } catch (err) {
           resultEl.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
         }
@@ -1619,6 +1637,83 @@ async function renderAccount() {
   }).catch(() => {
     const el = document.getElementById('referral-stats');
     if (el) el.innerHTML = `<p class="muted" style="font-size:13px;margin:0;">Couldn't load referral stats right now.</p>`;
+  });
+}
+
+// Loads Braintree's Drop-in UI into #braintree-dropin-container. Drop-in is
+// what actually renders the card / Apple Pay / Venmo / PayPal picker — which
+// methods show up depends entirely on what's enabled on the Braintree
+// control panel for this merchant account (and, for Apple Pay, on domain
+// verification being done there too), not on anything in this file. Loaded
+// lazily (only once someone reaches a verified real-money account page)
+// rather than on every page load, since most visitors never need it.
+const BRAINTREE_DROPIN_SRC = 'https://js.braintreegateway.com/web/dropin/1.47.0/js/dropin.min.js';
+
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing) {
+      if (existing.dataset.loaded === 'true') return resolve();
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('Failed to load ' + src)));
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = () => { script.dataset.loaded = 'true'; resolve(); };
+    script.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(script);
+  });
+}
+
+async function initBraintreeDropin() {
+  const container = document.getElementById('braintree-dropin-container');
+  const submitBtn = document.getElementById('real-deposit-submit');
+  const resultEl = document.getElementById('real-deposit-result');
+  if (!container) return; // guard: user may have navigated away already
+
+  const setUpDropin = async () => {
+    if (window._btDropin) {
+      try { await window._btDropin.teardown(); } catch (_) { /* already gone */ }
+      window._btDropin = null;
+    }
+    container.innerHTML = 'Loading payment options…';
+    const amountVal = parseFloat(document.getElementById('real-deposit-amount').value) || 1;
+    try {
+      const { client_token } = await api('/api/braintree/client-token');
+      await loadScriptOnce(BRAINTREE_DROPIN_SRC);
+      container.innerHTML = '';
+      window._btDropin = await window.braintree.dropin.create({
+        authorization: client_token,
+        container,
+        // Apple Pay needs a domain-verified merchant + a total to show in
+        // the payment sheet; falls back to whatever amount is currently
+        // typed (or $1.00 default) and gets rebuilt below when it changes.
+        applePay: {
+          displayName: 'UNICORN',
+          paymentRequest: { total: { label: 'UNICORN deposit', amount: amountVal.toFixed(2) } },
+        },
+        venmo: { allowNewBrowserTab: false },
+        paypal: { flow: 'checkout', amount: amountVal.toFixed(2), currency: 'USD' },
+      });
+      if (submitBtn) submitBtn.disabled = false;
+    } catch (err) {
+      // Most common cause here: this deploy has UNICORN_REAL_MONEY_ENABLED
+      // on but no Braintree credentials configured yet — surface that
+      // plainly instead of a raw JS error.
+      container.innerHTML = `<p class="error-text" style="font-size:13px;">Couldn't load payment options: ${escapeHtml(err.message)}</p>`;
+      if (submitBtn) submitBtn.disabled = true;
+    }
+  };
+
+  await setUpDropin();
+
+  // Rebuild (debounced) when the amount changes, so Apple Pay's displayed
+  // total and the PayPal button's charged amount stay accurate.
+  let debounceTimer = null;
+  document.getElementById('real-deposit-amount').addEventListener('input', () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(setUpDropin, 600);
   });
 }
 

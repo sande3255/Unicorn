@@ -421,16 +421,25 @@ payments provider note further down.
   specifically carry state-by-state exposure.
 - **Deposits/withdrawals** — `POST /api/real-money/deposit` and
   `/api/real-money/withdraw`, gated on `UNICORN_REAL_MONEY_ENABLED` and on
-  the caller's `kyc_status` being `verified`. No real payment processor is
-  connected — `realmoney.StubPaymentsProvider` refuses to do anything at
-  all (a clean 503, not a fake success) unless a *second*,
-  separately-named flag, `UNICORN_ALLOW_STUB_PAYMENTS`, is also set —
-  purely so the endpoints/ledger/frontend can be exercised end-to-end in
-  testing without a real processor account, and so a stub can never be
-  mistaken for a real integration or left on by accident in production.
-  Swap in a real processor (Stripe, an ACH/banking partner, etc.) by
-  writing one class that implements `realmoney.PaymentsProvider` and
-  pointing `payments_provider` at it.
+  the caller's `kyc_status` being `verified`. Two processor options exist
+  side by side in `realmoney.py`:
+  - `StubPaymentsProvider` — refuses to do anything at all (a clean 503,
+    not a fake success) unless `UNICORN_ALLOW_STUB_PAYMENTS` is also set,
+    purely so the endpoints/ledger/frontend can be exercised end-to-end in
+    testing without a real processor account.
+  - `BraintreePaymentsProvider` — a real integration, used automatically
+    the moment `BRAINTREE_MERCHANT_ID` is set (see "Payment processor
+    setup" below). **Deposits** go through Braintree's Drop-in UI (cards,
+    Apple Pay, Venmo, and PayPal, all in one widget, once each is enabled
+    on the Braintree control panel). **Withdrawals** go out through a
+    *separate* product, PayPal Payouts, to a PayPal or Venmo account
+    identified by email — Braintree itself has no API to send money to a
+    customer, and pushing straight back to a card would need Visa
+    Direct/Mastercard Send, which needs its own underwriting approval and
+    isn't wired in here.
+  Swap in a different processor entirely by writing one more class that
+  implements `realmoney.PaymentsProvider` and pointing `payments_provider`
+  at it — nothing else in the app needs to change.
 - **A separate real-dollar balance** — `users.real_balance`, deliberately
   never touched by any play-money code path (daily bonus, referral bonus,
   demo deposit, trading all still only ever touch `balance`). Every
@@ -443,14 +452,49 @@ payments provider note further down.
   verification, real balance + deposit/withdraw forms + transaction
   history after.
 
-**What this is *not*:** a payment integration, a KYC/AML program, or
-anything that makes taking real money legal on its own. It's the
-application-layer plumbing so that once a real KYC vendor, a real payment
-processor, a custody/banking partner, and actual CFTC/state registration
-are all in place, wiring them in is "write one class per interface," not
-"redesign the app." See "Before this can take real money" below for the
-full list of what's still needed, and `UNICORN_Licensing_Punch_List` for
-the regulatory path itself.
+**What this is *not*:** a KYC/AML program, or anything that makes taking
+real money legal on its own — the payment processing itself is now real
+(see below), but identity verification is still the manual placeholder,
+and nothing here substitutes for the actual CFTC/state registration work.
+See "Before this can take real money" below for the full list of what's
+still needed, and `UNICORN_Licensing_Punch_List` for the regulatory path
+itself.
+
+### Payment processor setup (Braintree + PayPal Payouts)
+
+**1. Braintree account (deposits — cards, Apple Pay, Venmo, PayPal).**
+Sign up at braintreepayments.com (it's a PayPal company; a PayPal Business
+account can link to it). From the Braintree control panel:
+
+- Grab the sandbox API keys first (Settings → API Keys) to test end-to-end
+  before ever touching production keys.
+- Enable Venmo and PayPal under Settings → Processing — off by default.
+- For Apple Pay: register a Merchant ID in your Apple Developer account,
+  then in Braintree go to Settings → Processing → Apple Pay, verify your
+  domain (Braintree gives you a file to host at
+  `/.well-known/apple-developer-merchantid-domain-association` — this repo
+  doesn't serve that route yet, so add it as a static file next to
+  `index.html` once Braintree gives you the file), and upload the payment
+  processing certificate. This step needs your own Apple Developer account
+  — nothing here can do it for you.
+- Set these on the deploy: `BRAINTREE_MERCHANT_ID`, `BRAINTREE_PUBLIC_KEY`,
+  `BRAINTREE_PRIVATE_KEY`, `BRAINTREE_ENVIRONMENT` (`sandbox` or
+  `production`).
+
+**2. PayPal Payouts (withdrawals — PayPal/Venmo only, not cards).**
+PayPal Payouts is a separate product from Braintree with its own
+approval — apply for it from your PayPal Business account (Pay & Get Paid
+→ Payouts, or via developer.paypal.com). Once approved, create a REST API
+app at developer.paypal.com to get a Client ID and Secret (distinct from
+the Braintree keys above). Set: `PAYPAL_PAYOUTS_CLIENT_ID`,
+`PAYPAL_PAYOUTS_SECRET`, `PAYPAL_ENVIRONMENT` (`sandbox` or `live`).
+Without these, deposits work but withdrawal attempts return a clean 503.
+
+**3. Test in sandbox before going anywhere near production keys.**
+Braintree's sandbox has its own test card numbers and a sandbox Venmo/
+PayPal flow; nothing charges real money until `BRAINTREE_ENVIRONMENT=production`
+and real keys are set. `UNICORN_REAL_MONEY_ENABLED` and KYC verification
+still gate everything on top of this, exactly as before.
 
 ## Market surveillance (anti-manipulation)
 

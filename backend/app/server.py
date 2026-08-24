@@ -1123,6 +1123,27 @@ def _require_kyc_verified(conn):
     return None
 
 
+@app.get("/api/braintree/client-token")
+@require_session_auth
+def braintree_client_token():
+    """The frontend calls this to initialize Braintree's Drop-in UI, which
+    is what actually shows the card / Apple Pay / Venmo / PayPal picker.
+    404s with the same "not enabled yet" message as the other real-money
+    routes if this deploy isn't configured for real payments yet."""
+    blocked = _require_real_money_enabled()
+    if blocked:
+        return blocked
+    if not hasattr(realmoney.payments_provider, "client_token"):
+        return jsonify({
+            "detail": "No real payment processor is connected on this deploy yet.",
+        }), 503
+    try:
+        token = realmoney.payments_provider.client_token()
+    except realmoney.PaymentsNotConfiguredError as e:
+        return jsonify({"detail": str(e)}), 503
+    return jsonify({"client_token": token})
+
+
 @app.post("/api/real-money/deposit")
 @require_session_auth
 @rate_limit(10, 60)
@@ -1146,8 +1167,11 @@ def real_money_deposit():
             "detail": f"amount must be between ${REAL_MONEY_DEPOSIT_MIN:.2f} and ${REAL_MONEY_DEPOSIT_MAX:,.2f}",
         }), 400
 
+    payment_method_nonce = (data.get("payment_method_nonce") or "").strip() or None
     try:
-        result = realmoney.payments_provider.create_deposit(g.user["id"], amount)
+        result = realmoney.payments_provider.create_deposit(
+            g.user["id"], amount, payment_method_nonce=payment_method_nonce,
+        )
     except realmoney.PaymentsNotConfiguredError as e:
         return jsonify({"detail": str(e)}), 503
 
@@ -1188,12 +1212,18 @@ def real_money_withdraw():
     if amount < REAL_MONEY_WITHDRAW_MIN:
         return jsonify({"detail": f"amount must be at least ${REAL_MONEY_WITHDRAW_MIN:.2f}"}), 400
 
+    payout_email = (data.get("payout_email") or "").strip() or None
+    if payout_email and "@" not in payout_email:
+        return jsonify({"detail": "payout_email must be a valid email address"}), 400
+
     user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
     if amount > user["real_balance"]:
         return jsonify({"detail": "Insufficient real-money balance"}), 400
 
     try:
-        result = realmoney.payments_provider.create_withdrawal(g.user["id"], amount)
+        result = realmoney.payments_provider.create_withdrawal(
+            g.user["id"], amount, payout_email=payout_email,
+        )
     except realmoney.PaymentsNotConfiguredError as e:
         return jsonify({"detail": str(e)}), 503
 
