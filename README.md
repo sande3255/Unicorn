@@ -445,7 +445,14 @@ payments provider note further down.
     confirms client-side with Stripe.js (that's also where any 3D
     Secure/SCA challenge happens), then the backend re-verifies the
     PaymentIntent's status directly with Stripe before crediting
-    `real_balance` — it never trusts the client's word alone.
+    `real_balance` — it never trusts the client's word alone. A webhook,
+    `POST /api/webhooks/stripe`, backs that client-driven step up: if the
+    tab closes right after paying but before the follow-up call fires,
+    Stripe's own `payment_intent.succeeded`/`payment_intent.payment_failed`
+    events still reach the backend directly and resolve the deposit. Both
+    paths share one idempotent update function
+    (`_finalize_stripe_deposit_row` in `server.py`), so it's safe if both
+    fire for the same payment.
   - **Withdrawals**, from either deposit method, go out through a
     *separate* product, PayPal Payouts, to a PayPal or Venmo account
     identified by email (`realmoney.PayPalPayoutsClient`, shared by both
@@ -520,6 +527,18 @@ are two unrelated companies). From the Stripe Dashboard:
   (`sk_live_`/`pk_live_`) is what actually turns on real charges — there's
   no separate `STRIPE_ENVIRONMENT` flag; it's determined by which keys are
   set.
+- Optional but recommended — the webhook that catches a deposit if the
+  browser closes right after paying (see the deposits/withdrawals section
+  above): in the Stripe Dashboard go to Developers → Webhooks → Add
+  endpoint, set the URL to `https://<your-domain>/api/webhooks/stripe`
+  (e.g. `https://unicorn-production-606e.up.railway.app/api/webhooks/stripe`),
+  and select the `payment_intent.succeeded` and
+  `payment_intent.payment_failed` events. Stripe shows a signing secret
+  (`whsec_...`) once the endpoint is created — set that as
+  `STRIPE_WEBHOOK_SECRET` on the deploy. Without this variable set, the
+  webhook route just returns a 503 rather than crediting anything, so it
+  fails safe if you skip this step — deposits still work via the
+  client-driven finalize call, just without the closed-tab safety net.
 
 **3. PayPal Payouts (withdrawals — PayPal/Venmo only, not cards).**
 This is a separate product from both Braintree and Stripe, with its own

@@ -311,12 +311,26 @@ class StripePaymentsProvider(PaymentsProvider):
          below) rather than trusting whatever the client reports, and only
          then credits real_balance.
 
+    Step 3 has a gap on its own: if the browser tab closes right after
+    paying but before that follow-up call fires, the deposit would sit
+    'pending' forever even though Stripe actually has the money.
+    verify_webhook_event below (used by /api/webhooks/stripe in server.py)
+    covers that — Stripe calls that endpoint directly whenever a
+    PaymentIntent's status changes, independent of whatever the browser
+    does afterward. Both paths funnel into the same idempotent row-update
+    logic (_finalize_stripe_deposit_row in server.py), so it doesn't matter
+    which one gets there first or if both do.
+
     Withdrawals go through PayPalPayoutsClient (see above), exactly like
     Braintree's — Stripe's own payout mechanism (Connect) requires each
     recipient to complete their own onboarding with Stripe and isn't wired
     in here.
 
-    Requires env vars: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY.
+    Requires env vars: STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY, and for
+    the webhook specifically: STRIPE_WEBHOOK_SECRET (from the webhook
+    endpoint's settings in the Stripe Dashboard — this is what lets
+    verify_webhook_event tell a real Stripe request apart from anyone else
+    POSTing to that public URL claiming a payment succeeded).
     """
 
     name = "stripe"
@@ -330,6 +344,7 @@ class StripePaymentsProvider(PaymentsProvider):
         self._stripe = stripe
         self._stripe.api_key = secret_key
         self._publishable_key = os.environ.get("STRIPE_PUBLISHABLE_KEY", "").strip()
+        self._webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "").strip()
         self._payouts = PayPalPayoutsClient()
 
     def publishable_key(self):
@@ -338,6 +353,20 @@ class StripePaymentsProvider(PaymentsProvider):
         if not self._publishable_key:
             raise PaymentsNotConfiguredError("STRIPE_PUBLISHABLE_KEY isn't set.")
         return self._publishable_key
+
+    def verify_webhook_event(self, payload, sig_header):
+        """Verifies an incoming webhook request is actually signed by
+        Stripe with this deploy's STRIPE_WEBHOOK_SECRET before trusting
+        anything in it — without this check, /api/webhooks/stripe would be
+        a public URL anyone could POST to and claim a deposit succeeded.
+        Returns the verified event (raises stripe's own
+        SignatureVerificationError on a bad signature — the caller in
+        server.py treats any exception here as "reject the request")."""
+        if not self._webhook_secret:
+            raise PaymentsNotConfiguredError(
+                "STRIPE_WEBHOOK_SECRET isn't set — can't verify webhook requests are really from Stripe."
+            )
+        return self._stripe.Webhook.construct_event(payload, sig_header, self._webhook_secret)
 
     def create_payment_intent(self, user_id, amount):
         intent = self._stripe.PaymentIntent.create(

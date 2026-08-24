@@ -1196,13 +1196,44 @@ def real_money_stripe_create_intent():
     return jsonify(intent)
 
 
+def _finalize_stripe_deposit_row(conn, row, status):
+    """Shared by the client-driven /api/real-money/stripe/finalize below
+    and the /api/webhooks/stripe handler further down — both can end up
+    trying to credit the same deposit (the client's own follow-up call,
+    and Stripe's webhook, are racing to report the same PaymentIntent), so
+    this is written to be safe to call twice: it's a no-op if `row` is
+    already 'completed'. Returns the user's real_balance after the call,
+    whether or not this particular call was the one that changed it."""
+    user = conn.execute("SELECT * FROM users WHERE id = ?", (row["user_id"],)).fetchone()
+    if row["status"] == "completed":
+        return user["real_balance"]
+    new_balance = user["real_balance"]
+    if status == "completed":
+        new_balance = round(user["real_balance"] + row["amount"], 2)
+        conn.execute("UPDATE users SET real_balance = ? WHERE id = ?", (new_balance, user["id"]))
+        conn.execute(
+            "UPDATE real_money_transactions SET status = 'completed', real_balance_after = ?, completed_at = ? "
+            "WHERE id = ?",
+            (new_balance, now_iso(), row["id"]),
+        )
+        _audit(conn, user["id"], user["id"], "real_money_deposit",
+               f"amount={row['amount']} status=completed provider=stripe")
+    else:
+        conn.execute("UPDATE real_money_transactions SET status = ? WHERE id = ?", (status, row["id"]))
+    conn.commit()
+    return new_balance
+
+
 @app.post("/api/real-money/stripe/finalize")
 @require_session_auth
 @rate_limit(10, 60)
 def real_money_stripe_finalize():
     """Step 3 of the Stripe deposit flow — called after Stripe.js confirms
     the PaymentIntent client-side. Re-checks status directly with Stripe
-    (never trusts the client's word alone) before crediting real_balance."""
+    (never trusts the client's word alone) before crediting real_balance.
+    Not the only path that can credit this row — see /api/webhooks/stripe
+    below, which catches the case where the browser never gets to call
+    this at all (tab closed right after paying)."""
     blocked = _require_real_money_enabled()
     if blocked:
         return blocked
@@ -1229,8 +1260,8 @@ def real_money_stripe_finalize():
     if row is None:
         return jsonify({"detail": "No matching deposit attempt found for this payment."}), 404
 
-    user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
     if row["status"] == "completed":
+        user = conn.execute("SELECT * FROM users WHERE id = ?", (g.user["id"],)).fetchone()
         return jsonify({"status": "completed", "real_balance": user["real_balance"], "amount": row["amount"]})
 
     try:
@@ -1238,21 +1269,58 @@ def real_money_stripe_finalize():
     except realmoney.PaymentsNotConfiguredError as e:
         return jsonify({"detail": str(e)}), 503
 
-    new_balance = user["real_balance"]
-    if result["status"] == "completed":
-        new_balance = round(user["real_balance"] + row["amount"], 2)
-        conn.execute("UPDATE users SET real_balance = ? WHERE id = ?", (new_balance, user["id"]))
-        conn.execute(
-            "UPDATE real_money_transactions SET status = 'completed', real_balance_after = ?, completed_at = ? "
-            "WHERE id = ?",
-            (new_balance, now_iso(), row["id"]),
-        )
-        _audit(conn, user["id"], user["id"], "real_money_deposit",
-               f"amount={row['amount']} status=completed provider=stripe")
-    else:
-        conn.execute("UPDATE real_money_transactions SET status = ? WHERE id = ?", (result["status"], row["id"]))
-    conn.commit()
+    new_balance = _finalize_stripe_deposit_row(conn, row, result["status"])
     return jsonify({"status": result["status"], "real_balance": new_balance, "amount": row["amount"]})
+
+
+@app.post("/api/webhooks/stripe")
+def stripe_webhook():
+    """Stripe calls this directly — it's not a logged-in user, so no
+    @require_session_auth here. This exists on top of the client-driven
+    finalize step above specifically for the case that step can't cover:
+    someone pays, then closes the tab (or loses connectivity) before the
+    page's own follow-up call fires. Without this, that deposit would sit
+    'pending' forever even though Stripe actually has the money.
+
+    Never trusts the request's contents until verify_webhook_event
+    confirms it's actually signed by Stripe with this deploy's
+    STRIPE_WEBHOOK_SECRET — anyone can POST to a public URL, so the
+    signature check is what makes this safe rather than a spoofable
+    "tell us you paid" endpoint."""
+    stripe_provider = realmoney.deposit_providers.get("stripe")
+    if stripe_provider is None:
+        return jsonify({"detail": "Stripe isn't connected on this deploy."}), 503
+
+    payload = request.get_data()
+    sig_header = request.headers.get("Stripe-Signature", "")
+    try:
+        event = stripe_provider.verify_webhook_event(payload, sig_header)
+    except realmoney.PaymentsNotConfiguredError as e:
+        return jsonify({"detail": str(e)}), 503
+    except Exception as e:
+        # Covers stripe.error.SignatureVerificationError plus any malformed
+        # payload — reject rather than guess at what a bad request meant.
+        return jsonify({"detail": f"Webhook signature verification failed: {e}"}), 400
+
+    event_type = event["type"]
+    if event_type not in ("payment_intent.succeeded", "payment_intent.payment_failed"):
+        return jsonify({"received": True})  # not an event this endpoint acts on
+
+    payment_intent_id = event["data"]["object"]["id"]
+    conn = db.get_db()
+    row = conn.execute(
+        "SELECT * FROM real_money_transactions WHERE provider = 'stripe' AND provider_reference = ? "
+        "AND type = 'deposit' ORDER BY created_at DESC LIMIT 1",
+        (payment_intent_id,),
+    ).fetchone()
+    if row is None:
+        # Nothing in our ledger for this PaymentIntent — not necessarily an
+        # error (could be a stale/duplicate event), just nothing to credit.
+        return jsonify({"received": True})
+
+    status = "completed" if event_type == "payment_intent.succeeded" else "failed"
+    _finalize_stripe_deposit_row(conn, row, status)
+    return jsonify({"received": True})
 
 
 @app.post("/api/real-money/deposit")
