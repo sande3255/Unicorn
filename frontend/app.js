@@ -1391,7 +1391,14 @@ function realMoneySectionHtml(status) {
     `;
   }
   if (status === 'pending') {
-    return `<p class="muted">Your identity verification is under review — check back soon.</p>`;
+    return `
+      <p class="muted">Your identity verification is under review — check back soon.</p>
+      ${pendingKycClientSecret ? `
+      <p class="muted" style="font-size:13px;">If a verification window didn't open (or you closed it before finishing), you can pick up where you left off:</p>
+      <button type="button" class="btn" id="kyc-resume-btn">Resume verification</button>
+      <div class="error-text" id="kyc-resume-error" style="display:none;"></div>
+      ` : ''}
+    `;
   }
   return `
     ${status === 'rejected' ? `<p class="error-text" id="kyc-rejection-reason">Your last submission wasn't approved.</p>` : ''}
@@ -1583,10 +1590,47 @@ async function renderAccount() {
               },
             });
             state.user.kyc_status = result.status;
+            if (result.client_secret) {
+              // Stripe Identity is the active provider on this deploy —
+              // result.status is 'pending' but nothing's actually been
+              // checked yet. Launch Stripe's own hosted document+selfie
+              // capture right away; the real status change happens later,
+              // out of band, via the webhook in server.py once Stripe
+              // finishes reviewing what gets submitted in that modal.
+              pendingKycClientSecret = result.client_secret;
+              try {
+                const stripeJs = await getStripeJsInstance();
+                await stripeJs.verifyIdentity(result.client_secret);
+              } catch (stripeErr) {
+                // The VerificationSession row already exists as 'pending'
+                // either way, so this isn't a submission failure — just
+                // note it and let the pending view's "Resume verification"
+                // button pick it back up.
+                console.error('Stripe Identity modal failed to open:', stripeErr);
+              }
+            }
             renderAccount();
           } catch (err) {
             errorEl.textContent = err.message;
             errorEl.style.display = 'block';
+          }
+        };
+      }
+      const kycResumeBtn = document.getElementById('kyc-resume-btn');
+      if (kycResumeBtn) {
+        kycResumeBtn.onclick = async () => {
+          const resumeErrorEl = document.getElementById('kyc-resume-error');
+          resumeErrorEl.style.display = 'none';
+          kycResumeBtn.disabled = true;
+          try {
+            const stripeJs = await getStripeJsInstance();
+            await stripeJs.verifyIdentity(pendingKycClientSecret);
+            renderAccount();
+          } catch (err) {
+            resumeErrorEl.textContent = err.message;
+            resumeErrorEl.style.display = 'block';
+          } finally {
+            kycResumeBtn.disabled = false;
           }
         };
       }
@@ -1682,6 +1726,14 @@ const DEPOSIT_PROVIDER_LABELS = {
 let activeDepositProvider = null;
 let depositPaymentConfig = null;
 
+// Set right after a successful /api/kyc/submit when Stripe Identity is the
+// active KYC provider (see the kyc-form submit handler below) — kept
+// around so the "Resume verification" fallback in the pending-status view
+// can reopen the same hosted modal without creating a brand new
+// VerificationSession, e.g. if a popup blocker ate the first attempt.
+// Page-load-scoped only; a real reload loses it, same as depositPaymentConfig.
+let pendingKycClientSecret = null;
+
 function loadScriptOnce(src) {
   return new Promise((resolve, reject) => {
     const existing = document.querySelector(`script[src="${src}"]`);
@@ -1697,6 +1749,25 @@ function loadScriptOnce(src) {
     script.onerror = () => reject(new Error('Failed to load ' + src));
     document.head.appendChild(script);
   });
+}
+
+// Shared between the deposit flow's Stripe Payment Element (which has its
+// own publishable key already loaded via depositPaymentConfig by the time
+// someone reaches a verified account) and Stripe Identity KYC (which needs
+// a Stripe.js instance BEFORE any of that deposit setup has ever run,
+// since identity verification happens first). Either caller reuses
+// window._stripeInstance if the other already created it — same Stripe
+// account, same publishable key either way, so there's never a reason to
+// have two.
+async function getStripeJsInstance() {
+  if (window._stripeInstance) return window._stripeInstance;
+  const config = await api('/api/real-money/payment-config');
+  if (!config.providers || !config.providers.stripe) {
+    throw new Error("Stripe isn't configured on this deploy.");
+  }
+  await loadScriptOnce(STRIPE_JS_SRC);
+  window._stripeInstance = window.Stripe(config.providers.stripe.publishable_key);
+  return window._stripeInstance;
 }
 
 async function setUpBraintreeDropin() {

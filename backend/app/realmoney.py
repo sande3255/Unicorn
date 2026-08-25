@@ -88,6 +88,65 @@ class ManualKYCProvider(KYCProvider):
         return {"status": "pending", "provider": self.name, "provider_reference": None}
 
 
+class StripeIdentityKYCProvider(KYCProvider):
+    """Real automated identity verification via Stripe Identity —
+    deliberately reuses STRIPE_SECRET_KEY, the same credential already set
+    for StripePaymentsProvider (deposits), rather than asking for a second
+    processor account. $1.50/document+selfie check, pay-as-you-go, per
+    Stripe's published pricing as of when this was wired up.
+
+    Unlike ManualKYCProvider, submit() can't hand back a final answer by
+    itself — nothing has actually verified anything yet at that point. It
+    creates a VerificationSession and returns its client_secret so the
+    frontend can launch Stripe's own hosted document+selfie capture flow
+    (see getStripeJsInstance()/verifyIdentity() in app.js). The real status
+    change happens later, out of band, when Stripe's webhook posts
+    identity.verification_session.verified (or .requires_input for a
+    failed/retryable attempt) to /api/webhooks/stripe — see
+    _finalize_stripe_kyc_session() in server.py. Until that webhook
+    arrives, status stays 'pending' exactly like the manual path, so
+    nothing else in the app needs to know or care which KYC provider is
+    active."""
+
+    name = "stripe_identity"
+
+    def __init__(self):
+        secret_key = os.environ.get("STRIPE_SECRET_KEY", "").strip()
+        if not secret_key:
+            raise PaymentsNotConfiguredError("STRIPE_SECRET_KEY isn't set — Stripe Identity needs it.")
+        import stripe
+        stripe.api_key = secret_key
+        self._stripe = stripe
+
+    def submit(self, user_id, legal_name, date_of_birth, address, state):
+        session = self._stripe.identity.VerificationSession.create(
+            type="document",
+            options={"document": {"require_matching_selfie": True}},
+            metadata={"unicorn_user_id": str(user_id)},
+        )
+        return {
+            "status": "pending",
+            "provider": self.name,
+            "provider_reference": session.id,
+            "client_secret": session.client_secret,
+        }
+
+
+def _build_kyc_provider():
+    """Stripe Identity whenever this deploy already has STRIPE_SECRET_KEY
+    set for payments — no separate credential to configure — otherwise
+    the manual admin-review placeholder. Falls back to manual rather than
+    raising if something about Stripe's SDK/API rejects at construction
+    time, since KYC still needs to work (via a human reviewer) even on a
+    deploy that hasn't set up Stripe at all."""
+    if os.environ.get("STRIPE_SECRET_KEY", "").strip():
+        try:
+            return StripeIdentityKYCProvider()
+        except Exception:
+            pass
+    return ManualKYCProvider()
+
+
 # ---------- payments ----------
 
 class PaymentsProvider:
@@ -422,7 +481,7 @@ def _build_deposit_providers():
     return providers
 
 
-kyc_provider = ManualKYCProvider()
+kyc_provider = _build_kyc_provider()
 deposit_providers = _build_deposit_providers()
 
 # Withdrawals aren't processor-specific (both real providers delegate to the

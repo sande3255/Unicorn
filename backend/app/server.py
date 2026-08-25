@@ -1022,7 +1022,16 @@ def submit_kyc():
     conn.execute("UPDATE users SET kyc_status = ? WHERE id = ?", (result["status"], g.user["id"]))
     _audit(conn, g.user["id"], g.user["id"], "kyc_submitted", f"provider={result['provider']} state={state}")
     conn.commit()
-    return jsonify({"status": result["status"], "provider": result["provider"]})
+    return jsonify({
+        "status": result["status"],
+        "provider": result["provider"],
+        # Only present when Stripe Identity is the active provider — the
+        # frontend uses this to launch Stripe's own hosted document+selfie
+        # capture right after submitting. Absent (None -> omitted key
+        # stays out of most clients' way) for the manual-review provider,
+        # where 'pending' really does just mean "waiting on a human."
+        "client_secret": result.get("client_secret"),
+    })
 
 
 @app.get("/api/kyc/status")
@@ -1224,6 +1233,32 @@ def _finalize_stripe_deposit_row(conn, row, status):
     return new_balance
 
 
+def _finalize_stripe_kyc_session(conn, session_id, status, rejection_reason=None):
+    """Analogous to _finalize_stripe_deposit_row above, but for a Stripe
+    Identity VerificationSession instead of a PaymentIntent — called only
+    from the webhook below, since (unlike deposits) there's no
+    client-driven finalize step for identity checks: the user's own
+    browser has no reliable way to learn the verdict on its own, Stripe's
+    fraud/document checks happen entirely on Stripe's side after the
+    hosted modal closes. Safe to call more than once for the same
+    session — a no-op once the row is already 'verified' or 'rejected'."""
+    row = conn.execute(
+        "SELECT * FROM kyc_verifications WHERE provider = 'stripe_identity' AND provider_reference = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    if row is None or row["status"] in ("verified", "rejected"):
+        return
+    conn.execute(
+        "UPDATE kyc_verifications SET status = ?, rejection_reason = ?, reviewed_at = ? WHERE id = ?",
+        (status, rejection_reason, now_iso(), row["id"]),
+    )
+    conn.execute("UPDATE users SET kyc_status = ? WHERE id = ?", (status, row["user_id"]))
+    _audit(conn, row["user_id"], row["user_id"], "kyc_stripe_identity_result",
+           f"status={status}" + (f" reason={rejection_reason}" if rejection_reason else ""))
+    conn.commit()
+
+
 @app.post("/api/real-money/stripe/finalize")
 @require_session_auth
 @rate_limit(10, 60)
@@ -1286,7 +1321,14 @@ def stripe_webhook():
     confirms it's actually signed by Stripe with this deploy's
     STRIPE_WEBHOOK_SECRET — anyone can POST to a public URL, so the
     signature check is what makes this safe rather than a spoofable
-    "tell us you paid" endpoint."""
+    "tell us you paid" endpoint.
+
+    One endpoint handles both PaymentIntent events (deposits) and Identity
+    VerificationSession events (KYC) — same Stripe account, same signing
+    secret, so there's one URL/secret to configure in the Stripe Dashboard
+    instead of two. Add identity.verification_session.verified and
+    .requires_input to this endpoint's subscribed events alongside the
+    existing payment_intent.* ones when setting this up."""
     stripe_provider = realmoney.deposit_providers.get("stripe")
     if stripe_provider is None:
         return jsonify({"detail": "Stripe isn't connected on this deploy."}), 503
@@ -1303,24 +1345,34 @@ def stripe_webhook():
         return jsonify({"detail": f"Webhook signature verification failed: {e}"}), 400
 
     event_type = event["type"]
-    if event_type not in ("payment_intent.succeeded", "payment_intent.payment_failed"):
-        return jsonify({"received": True})  # not an event this endpoint acts on
-
-    payment_intent_id = event["data"]["object"]["id"]
     conn = db.get_db()
-    row = conn.execute(
-        "SELECT * FROM real_money_transactions WHERE provider = 'stripe' AND provider_reference = ? "
-        "AND type = 'deposit' ORDER BY created_at DESC LIMIT 1",
-        (payment_intent_id,),
-    ).fetchone()
-    if row is None:
-        # Nothing in our ledger for this PaymentIntent — not necessarily an
-        # error (could be a stale/duplicate event), just nothing to credit.
+
+    if event_type in ("payment_intent.succeeded", "payment_intent.payment_failed"):
+        payment_intent_id = event["data"]["object"]["id"]
+        row = conn.execute(
+            "SELECT * FROM real_money_transactions WHERE provider = 'stripe' AND provider_reference = ? "
+            "AND type = 'deposit' ORDER BY created_at DESC LIMIT 1",
+            (payment_intent_id,),
+        ).fetchone()
+        if row is not None:
+            status = "completed" if event_type == "payment_intent.succeeded" else "failed"
+            _finalize_stripe_deposit_row(conn, row, status)
+        # else: nothing in our ledger for this PaymentIntent — not
+        # necessarily an error (could be a stale/duplicate event), just
+        # nothing to credit.
         return jsonify({"received": True})
 
-    status = "completed" if event_type == "payment_intent.succeeded" else "failed"
-    _finalize_stripe_deposit_row(conn, row, status)
-    return jsonify({"received": True})
+    if event_type in ("identity.verification_session.verified", "identity.verification_session.requires_input"):
+        session_id = event["data"]["object"]["id"]
+        if event_type == "identity.verification_session.verified":
+            _finalize_stripe_kyc_session(conn, session_id, "verified")
+        else:
+            last_error = event["data"]["object"].get("last_error") or {}
+            reason = last_error.get("reason") or "Verification couldn't be completed — please try again."
+            _finalize_stripe_kyc_session(conn, session_id, "rejected", rejection_reason=reason)
+        return jsonify({"received": True})
+
+    return jsonify({"received": True})  # not an event this endpoint acts on
 
 
 @app.post("/api/real-money/deposit")
