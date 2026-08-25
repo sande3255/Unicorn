@@ -2322,6 +2322,31 @@ function renderFaq() {
 
 // ---------- support banner ----------
 
+// ---------- top disclaimer banner ----------
+//
+// index.html ships this hardcoded to "DEMO — ... Not connected to any real
+// payment method" as a safe default (so it reads correctly even if this
+// fetch fails or JS hasn't run yet). This is the ONLY place that banner's
+// text ever changes — nothing before this existed to flip it once Braintree/
+// Stripe actually went live, which is why the site could be fully wired for
+// real payments while every page still displayed the old demo-only warning.
+async function initTopBanner() {
+  const banner = document.getElementById('banner');
+  if (!banner) return;
+  try {
+    const config = await api('/api/config', { auth: false });
+    if (config && config.real_money_enabled) {
+      banner.textContent = '⚠ REAL MONEY MODE — deposits and withdrawals use real payment processors. KYC verification is required before withdrawing. See the README for full details.';
+      banner.classList.add('live');
+    }
+    // If real_money_enabled is false, leave the original hardcoded DEMO
+    // text in place — that's already the accurate, safe-by-default state.
+  } catch (e) {
+    // Network hiccup or config endpoint unreachable — say demo/play-money,
+    // never guess "live" when we can't confirm it.
+  }
+}
+
 const SUPPORT_BANNER_DISMISS_KEY = 'unicorn_support_banner_dismissed_v1';
 
 function initSupportBanner() {
@@ -2448,6 +2473,7 @@ async function pollActivity() {
 // ---------- boot ----------
 
 (async function boot() {
+  initTopBanner();
   initSupportBanner();
   initInstallBanner();
   pollActivity();
