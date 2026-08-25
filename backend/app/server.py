@@ -2302,18 +2302,37 @@ def health():
 
 
 # ---------- serve frontend ----------
+#
+# no-cache (not no-store) on every response here: this still lets
+# browsers/proxies keep a copy, but forces a conditional revalidation
+# (If-None-Match / If-Modified-Since) on every request instead of trusting
+# a locally- or edge-cached copy for some heuristic TTL. Added after a real
+# incident where a code fix was pushed, built, and deployed successfully,
+# but /app.js kept serving the previous deploy's content anyway — Flask's
+# default send_from_directory sends no explicit Cache-Control at all, which
+# leaves it up to whatever's in front of the app (a browser, a corporate
+# proxy, Railway's own edge) to guess a caching policy, and evidently
+# something in that path was guessing "cache it a while." Real revenue
+# code (the banner reflecting real-money mode, deposit/withdraw UI, etc.)
+# living behind an unpredictable cache is a correctness problem, not just
+# an annoyance, so this trades a small amount of extra revalidation
+# traffic for every static asset always reflecting the latest deploy.
+def _no_cache(response):
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
 
 @app.get("/")
 def index():
-    return send_from_directory(FRONTEND_DIR, "index.html")
+    return _no_cache(send_from_directory(FRONTEND_DIR, "index.html"))
 
 
 @app.get("/<path:path>")
 def static_files(path):
     full = os.path.join(FRONTEND_DIR, path)
     if os.path.isfile(full):
-        return send_from_directory(FRONTEND_DIR, path)
-    return send_from_directory(FRONTEND_DIR, "index.html")
+        return _no_cache(send_from_directory(FRONTEND_DIR, path))
+    return _no_cache(send_from_directory(FRONTEND_DIR, "index.html"))
 
 
 if __name__ == "__main__":
