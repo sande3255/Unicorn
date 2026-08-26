@@ -23,9 +23,12 @@ interface and pointing kyc_provider / payments_provider at it; nothing else
 in the app should need to change.
 """
 
+import logging
 import os
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 # Master switch. Defaults to false everywhere (local dev, Railway, anywhere)
 # until someone deliberately sets it — flipping this alone does NOT make the
@@ -119,17 +122,33 @@ class StripeIdentityKYCProvider(KYCProvider):
         self._stripe = stripe
 
     def submit(self, user_id, legal_name, date_of_birth, address, state):
-        session = self._stripe.identity.VerificationSession.create(
-            type="document",
-            options={"document": {"require_matching_selfie": True}},
-            metadata={"unicorn_user_id": str(user_id)},
-        )
-        return {
-            "status": "pending",
-            "provider": self.name,
-            "provider_reference": session.id,
-            "client_secret": session.client_secret,
-        }
+        try:
+            session = self._stripe.identity.VerificationSession.create(
+                type="document",
+                options={"document": {"require_matching_selfie": True}},
+                metadata={"unicorn_user_id": str(user_id)},
+            )
+            return {
+                "status": "pending",
+                "provider": self.name,
+                "provider_reference": session.id,
+                "client_secret": session.client_secret,
+            }
+        except self._stripe.StripeError as e:
+            # Most commonly a PermissionError: Stripe hasn't yet approved
+            # this account's business category to use the Identity product
+            # (see https://docs.stripe.com/identity/use-cases) — that's an
+            # account-level approval Stripe has to grant, not something
+            # retrying or fixing code here can work around. Rather than
+            # 500 and block every signup while that gets sorted out with
+            # Stripe support, fall back to the same manual-review path
+            # ManualKYCProvider uses, so a human admin can clear users from
+            # the existing admin KYC queue in the meantime.
+            logger.warning(
+                "Stripe Identity submit() failed for user %s, falling back to manual review: %s",
+                user_id, e,
+            )
+            return {"status": "pending", "provider": "manual", "provider_reference": None}
 
 
 def _build_kyc_provider():
