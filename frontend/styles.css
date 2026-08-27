@@ -1,10 +1,11 @@
 /* UNICORN — yellowjacket / treasure theme: black fields, gold detailing.
-   This is the app's fixed identity now, not a light/dark toggle. */
+   This is the app's fixed identity now, not a light/dark toggle.
+   Fields shifted from a warm near-black to a dark emerald near-black. */
 :root {
   color-scheme: dark;
-  --page: #070705;
-  --surface-1: #0e0d09;
-  --card-bg: #17160f;
+  --page: #050f0a;
+  --surface-1: #0b1c13;
+  --card-bg: #12281c;
   --text-primary: #f5f2e6;
   --text-secondary: #b8b3a0;
   --text-muted: #8a8575;
@@ -76,7 +77,7 @@ body {
 }
 
 #banner {
-  background: #0e0d09;
+  background: var(--surface-1);
   color: var(--gold);
   text-align: center;
   font-size: 12.5px;
@@ -100,7 +101,7 @@ body {
    distinct, optional ask rather than a warning. Dismissible; app.js
    remembers the dismissal in localStorage so it doesn't nag every visit. */
 #support-banner {
-  background: linear-gradient(90deg, #0c1620, #0e0d09 55%, #0c1620);
+  background: linear-gradient(90deg, #0c1620, var(--surface-1) 55%, #0c1620);
   border-bottom: 1px solid var(--border-strong);
   padding: 8px 12px;
 }
