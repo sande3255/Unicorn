@@ -129,6 +129,15 @@ AUTO_MARKET_CONFIGS = (
     ]
 )
 
+# The only market_types price_feed.get_price() actually knows how to price.
+# Imported market types (sports, odds, kalshi, polymarket) are opened and
+# settled through their own sync functions (sports_tick, odds_tick,
+# sync_external_markets) instead — never through price_feed — so the
+# settlement query in tick() below must stay scoped to this set, or it'll
+# sweep up an imported market and hand its (external) symbol to
+# price_feed.get_price(), which doesn't recognize it and raises.
+AUTO_PRICED_MARKET_TYPES = tuple(sorted({cfg["market_type"] for cfg in AUTO_MARKET_CONFIGS}))
+
 
 def _fmt_price(price: float) -> str:
     return f"${price:,.4f}" if price < 1 else f"${price:,.2f}"
@@ -208,10 +217,16 @@ def tick(conn, price_fetcher=price_feed.get_price, log=print):
             conn.execute("UPDATE markets SET current_price = ? WHERE id = ?", (live_price, open_row["id"]))
             conn.commit()
 
-    # 3: resolve anything past its close_time.
+    # 3: resolve anything past its close_time. Scoped to AUTO_PRICED_MARKET_TYPES
+    # so an imported market (sports/odds/kalshi/polymarket) sharing is_auto=1
+    # and a past close_time never gets routed through price_feed.get_price(),
+    # which doesn't know how to price those types (see the comment above
+    # AUTO_PRICED_MARKET_TYPES) — those settle through their own sync path.
+    placeholders = ",".join("?" for _ in AUTO_PRICED_MARKET_TYPES)
     due = conn.execute(
-        "SELECT * FROM markets WHERE is_auto = 1 AND status = 'open' AND close_time <= ?",
-        (now.isoformat(),),
+        f"SELECT * FROM markets WHERE is_auto = 1 AND status = 'open' AND close_time <= ? "
+        f"AND market_type IN ({placeholders})",
+        (now.isoformat(), *AUTO_PRICED_MARKET_TYPES),
     ).fetchall()
     for m in due:
         try:
